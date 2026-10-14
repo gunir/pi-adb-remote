@@ -121,6 +121,7 @@ export type AdbTransportMethod =
   | "forward"
   | "unforward"
   | "listForwards"
+  | "screencap"
   | "install"
   | "uninstall";
 
@@ -134,6 +135,7 @@ export const METHOD_CLASS: Record<AdbTransportMethod, MethodClass> = {
   readBytes: "read",
   sampleBytes: "read",
   listForwards: "read",
+  screencap: "read",
   exec: "mutate",
   writeBytes: "mutate",
   push: "mutate",
@@ -333,6 +335,14 @@ export class AdbTransport {
       throw new Error(`Device produced no bytes for ${devicePath} (${info.size} bytes per stat) — SELinux may deny the shell user`);
     }
     return bytes;
+  }
+
+  /**
+   * `exec-out screencap -p` (V31): a single-purpose binary capture rather than a general
+   * exec-out escape hatch, so nothing caller-supplied can reach the device as a "read".
+   */
+  async screencap(timeoutSeconds = DEFAULT_DEVICE_TIMEOUT_SECONDS): Promise<Buffer> {
+    return this.#execOut("screencap -p", timeoutSeconds);
   }
 
   async sampleBytes(devicePath: string, count: number): Promise<Buffer> {

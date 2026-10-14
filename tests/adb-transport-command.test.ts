@@ -97,7 +97,7 @@ test("METHOD_CLASS covers every public AdbTransport method exactly once (F7)", (
   const declared = (Object.keys(METHOD_CLASS) as AdbTransportMethod[]).sort();
   assert.deepEqual(declared, prototypeMethods);
   const readable = declared.filter((name) => METHOD_CLASS[name] === "read");
-  assert.deepEqual(readable.sort(), ["listForwards", "readBytes", "readTextRange", "sampleBytes", "stat"]);
+  assert.deepEqual(readable.sort(), ["listForwards", "readBytes", "readTextRange", "sampleBytes", "screencap", "stat"]);
   const mutating = declared.filter((name) => METHOD_CLASS[name] === "mutate");
   assert.deepEqual(mutating.sort(), [
     "exec",
