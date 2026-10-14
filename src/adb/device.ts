@@ -413,6 +413,9 @@ export function classifyAdbError(text: string): AdbFailure {
   const haystack = text.toLowerCase();
   if (/cannot bind listener/.test(haystack)) return "forward-bind-conflict";
   if (/cannot rebind existing socket/.test(haystack)) return "forward-rebind";
+  // V24: a busy local port is reported as `failed to reserve port: address already in use`. That
+  // is a port conflict owned by another process, not a broken server (F27).
+  if (/failed to reserve port|address already in use/.test(haystack)) return "forward-bind-conflict";
   if (/device offline|is offline/.test(haystack)) return "offline";
   if (/unauthorized/.test(haystack)) return "unauthorized";
   if (/more than one device|multiple devices|ambiguous.*device/.test(haystack)) return "ambiguous";

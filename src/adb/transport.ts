@@ -8,7 +8,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, posix } from "node:path";
 import { runAdb, execOutArgv, shellArgv, subcommandArgv, type AdbProcessResult } from "./cli.ts";
 import { classifyAdbError, CONTROL_MAX_CAPTURE_BYTES, type DeviceCapabilities } from "./device.ts";
@@ -29,7 +29,9 @@ export interface DeviceForwardSpec {
   name: string;
 }
 
-const FORWARD_PATTERN = /^(\d+):(tcp|localabstract|dev|jdwp):(.+)$/;
+// Names may contain `:` (jdwp names are `<process>:<pid>`) but never whitespace: `adb forward
+// --list` is whitespace-delimited, so a space would make a forward unreadable (V24).
+const FORWARD_PATTERN = /^(\d+):(tcp|localabstract|dev|jdwp):([A-Za-z0-9._%+/-][A-Za-z0-9._%+/:@-]*)$/;
 
 export function parseForwardSpec(value: string): DeviceForwardSpec {
   const match = FORWARD_PATTERN.exec(value);
@@ -289,6 +291,17 @@ export class AdbTransport {
 
   async stat(devicePath: string): Promise<DeviceStat | undefined> {
     const output = await this.#shell(STAT_COMMAND(devicePath));
+    // The command swallows `stat`'s own error and prints ABSENT, so a non-zero exit here means
+    // the device or the daemon failed — reporting that as "no such file" would be a lie (F19).
+    if (output.timedOut) throw new DeviceCommandError(`could not stat ${devicePath}: timed out`, null, "", true);
+    if (output.exitCode !== 0) {
+      const stderr = output.stderr.toString("utf8").trim();
+      throw new DeviceCommandError(
+        `could not stat ${devicePath}: ${stderr || `device command exited with code ${output.exitCode}`}`,
+        output.exitCode,
+        stderr,
+      );
+    }
     return parseStatOutput(output.stdout.toString("utf8"));
   }
 
@@ -370,6 +383,14 @@ export class AdbTransport {
     // `stat -L` follows links (V14), so a symlinked target must be resolved explicitly: without
     // this, `mv -f` would replace the link and orphan its file (F16).
     const target = await this.#resolveReal(devicePath);
+    if (targetStat && targetStat.kind !== "file") {
+      // `mv -f <staged> <dir>` would silently drop the file *inside* the directory (F16 family).
+      throw new Error(
+        targetStat.kind === "dir"
+          ? `${devicePath} is a directory (mode ${targetStat.mode}) — refusing to overwrite it`
+          : `${devicePath} is a ${targetStat.kind}, not a regular file — refusing to write to it`,
+      );
+    }
     const parent = posix.dirname(target) || "/";
     const desiredMode = targetStat ? targetStat.mode : "644";
     const mode = MODE_PATTERN.test(desiredMode) ? desiredMode : "644";
@@ -430,7 +451,13 @@ export class AdbTransport {
     if (!existsSync(hostPath) || !statSync(hostPath).isFile()) {
       throw new Error(`Host file not found: ${hostPath}`);
     }
-    const destination = await this.#resolvePushTarget(hostPath, devicePath, o.overwrite === true);
+    const { destination, existing } = await this.#resolvePushTarget(hostPath, devicePath, o.overwrite === true);
+    if (existing?.kind === "file") {
+      // Pushing over an existing file uses the same staging dance as `writeBytes` (§5.4): the
+      // replacement is atomic and keeps the destination's mode instead of resetting it.
+      await this.writeBytes(destination, readFileSync(hostPath));
+      return;
+    }
     const pushed = await runAdb(
       subcommandArgv(this.device, this.transportSerial, ["push", hostPath, destination]),
       { timeoutSeconds: DEFAULT_DEVICE_TIMEOUT_SECONDS, maxCaptureBytes: CONTROL_MAX_CAPTURE_BYTES },
@@ -441,19 +468,23 @@ export class AdbTransport {
     }
   }
 
-  async #resolvePushTarget(hostPath: string, devicePath: string, overwrite: boolean): Promise<string> {
+  async #resolvePushTarget(
+    hostPath: string,
+    devicePath: string,
+    overwrite: boolean,
+  ): Promise<{ destination: string; existing: DeviceStat | undefined }> {
     const info = await this.stat(devicePath);
-    if (!info) return devicePath;
+    if (!info) return { destination: devicePath, existing: undefined };
     if (info.kind === "dir") {
       if (!devicePath.endsWith("/")) {
         throw new Error(`${devicePath} is a directory — end the device path with '/' to push into it`);
       }
-      return posix.join(devicePath, basename(hostPath));
+      return { destination: posix.join(devicePath, basename(hostPath)), existing: info };
     }
     if (!overwrite) {
       throw new Error(`${devicePath} already exists (mode ${info.mode}, ${info.size} bytes) — pass overwrite: true to replace it`);
     }
-    return devicePath;
+    return { destination: devicePath, existing: info };
   }
 
   async pull(devicePath: string, hostPath: string, o: { overwrite?: boolean } = {}): Promise<void> {

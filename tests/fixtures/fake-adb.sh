@@ -8,6 +8,11 @@
 # stat/timeout/sed/head/readlink/find semantics match the toybox shapes measured on the phone.
 set -u
 
+# FAKE_ADB_LOG=<file>: records every invocation so tests can count spawns (V1).
+if [ -n "${FAKE_ADB_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_ADB_LOG"
+fi
+
 sub=""
 for token in "$@"; do
   case "$token" in
@@ -82,15 +87,68 @@ case "$sub" in
       printf 'adb: error: %s\n' "$FAKE_ADB_FORWARD_ERROR" 1>&2
       exit 1
     fi
-    if [ "${FAKE_ADB_FORWARD_LIST:-0}" = "1" ]; then
-      printf '%s\n' "${FAKE_ADB_FORWARDS:-}"
+    # Drop the global options and the subcommand so the forward arguments are positional.
+    until [ $# -eq 0 ]; do a="$1"; shift; [ "$a" = forward ] && break; done
+    [ "${1:-}" = "--no-rebind" ] && shift
+    fwfile="$FAKE_ADB_ROOT/.fake-forwards"
+    if [ "${1:-}" = "--list" ]; then
+      [ -f "$fwfile" ] && cat "$fwfile"
+      [ -n "${FAKE_ADB_FORWARDS:-}" ] && printf '%s\n' "$FAKE_ADB_FORWARDS"
+      exit 0
     fi
+    if [ "${1:-}" = "--remove" ]; then
+      gone="${2:-}"
+      if [ -f "$fwfile" ] && grep -q " ${gone} " "$fwfile"; then
+        grep -v " ${gone} " "$fwfile" > "$fwfile.new" && mv "$fwfile.new" "$fwfile"
+      else
+        printf 'error: no such forwarding spec %s\n' "$gone" 1>&2
+        exit 1
+      fi
+      exit 0
+    fi
+    local_spec="${1:-}"; remote_spec="${2:-}"
+    if [ -f "$fwfile" ] && grep -q " ${local_spec} " "$fwfile"; then
+      printf 'adb: error: failed to reserve port: address already in use\n' 1>&2
+      exit 1
+    fi
+    printf '%s %s %s\n' "$emitted_serial" "$local_spec" "$remote_spec" >> "$fwfile"
     exit 0
     ;;
   install)
+    if [ -n "${FAKE_ADB_TRANSFER_ERROR:-}" ]; then
+      # The APK never reaches the package manager (V26): the copy itself failed.
+      printf 'adb: %s\n' "$FAKE_ADB_TRANSFER_ERROR" 1>&2
+      exit 1
+    fi
+    case "${FAKE_ADB_INSTALL_STREAM:-}" in
+      dir)
+        printf 'Performing Streamed Install\n'
+        printf "Could not access '/data/local/tmp/sideload-x': remote couldn't create file: Is a directory\n" 1>&2
+        exit 1
+        ;;
+      space)
+        printf 'Performing Streamed Install\n'
+        printf 'failed to commit install: No space left on device\n' 1>&2
+        exit 1
+        ;;
+    esac
     printf '%s\n' "${FAKE_ADB_INSTALL_OUTPUT:-Performing Streamed Install}"
     if [ -n "${FAKE_ADB_INSTALL_FAILURE:-}" ]; then
       printf 'Failure [%s]\n' "$FAKE_ADB_INSTALL_FAILURE"
+      exit 1
+    fi
+    printf 'Success\n'
+    exit 0
+    ;;
+  uninstall)
+    until [ $# -eq 0 ]; do a="$1"; shift; [ "$a" = uninstall ] && break; done
+    [ "${1:-}" = "-k" ] && shift
+    if [ -n "${FAKE_ADB_UNINSTALL_FAILURE:-}" ]; then
+      printf 'Failure [%s]\n' "$FAKE_ADB_UNINSTALL_FAILURE"
+      exit 1
+    fi
+    if [ -z "${1:-}" ]; then
+      printf 'error: no package specified\n' 1>&2
       exit 1
     fi
     printf 'Success\n'
@@ -162,7 +220,17 @@ if [ ! -d "${FAKE_ADB_ROOT:-/}" ]; then
 fi
 cd "$FAKE_ADB_ROOT" || exit 1
 
+# A device that will not run commands at all (offline / unauthorized mid-flight).
+if [ -n "${FAKE_ADB_SHELL_ERROR:-}" ] && { [ "$sub" = "shell" ] || [ "$sub" = "exec-out" ]; }; then
+  printf '%s\n' "$FAKE_ADB_SHELL_ERROR" 1>&2
+  exit "${FAKE_ADB_SHELL_RC:-5}"
+fi
+
 if [ "$sub" = "exec-out" ]; then
+  if [ -n "${FAKE_ADB_EXEC_OUT_EMPTY:-}" ]; then
+    # V3 + V34: rc 0 and not a single byte, even though `stat` promised content.
+    exit 0
+  fi
   /bin/sh -c "$last"
   # V3: exec-out reports success even when the device command failed.
   exit 0
