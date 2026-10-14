@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -134,9 +134,33 @@ describe("adb tool routing on a real device", { skip: skipReason }, () => {
     assert.equal(Buffer.from(image.data, "base64").subarray(1, 4).toString(), "PNG");
   });
 
+  it("captures the screen onto the PC and as an image block", async () => {
+    const hostPath = join(sandbox, "capture.png");
+    const result = await call("adb", { action: "screen", hostPath });
+    const image = (result.content ?? []).find((block: any) => block.type === "image");
+    assert.ok(image, `expected an image block, got: ${text(result).slice(0, 120)}`);
+    assert.equal(image.mimeType, "image/png");
+    assert.equal(Buffer.from(image.data, "base64").subarray(1, 4).toString(), "PNG");
+    assert.equal(existsSync(hostPath), true, `the capture was written to ${hostPath}`);
+    const onDisk = readFileSync(hostPath);
+    assert.equal(onDisk.subarray(1, 4).toString(), "PNG");
+    assert.equal(onDisk.length, result.details.bytes, "the reported size is what landed on disk");
+  });
+
   it("reports a device timeout instead of a crash", async () => {
     await assert.rejects(() => call("bash", { command: "sleep 30", timeout: 2 }), /Command timed out after 2 seconds/);
     assert.equal((await call("bash", { command: "echo alive" })).structuredContent?.exit_code, 0, "the session survived");
+  });
+
+  it("reports a rejected wireless pairing instead of its exit code", async () => {
+    // Measured (V36): `adb pair` reads the code from stdin and exits 0 even when it fails, so the
+    // extension must judge the text. 127.0.0.1:5555 is not a pairing endpoint.
+    harness.ui.input = "ABCDEF123456";
+    const paired = await call("adb", { action: "pair", devicePath: "127.0.0.1:5555" });
+    harness.ui.input = null;
+    assert.equal(paired.isError, true, text(paired));
+    assert.match(text(paired), /Wireless pairing failed/);
+    assert.ok(!text(paired).includes("ABCDEF123456"), "the code is never echoed back");
   });
 
   it("disconnects and returns the tools to the PC", async () => {

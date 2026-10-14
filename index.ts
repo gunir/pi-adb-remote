@@ -319,6 +319,13 @@ function saveEndpointConfig(command: string, updates: DeviceEndpointConfig, make
   });
 }
 
+/** The complete action vocabulary of the `adb` tool; `forget` is gone (no credentials exist). */
+const ADB_CONTROL_ACTIONS = [
+  "connect", "reconnect", "devices", "status", "disconnect", "pair",
+  "forward", "unforward", "exec", "chdir", "note", "memory",
+  "screen", "pull", "push", "install", "uninstall",
+] as const;
+
 const ADB_TOP_LEVEL_COMPLETIONS: AutocompleteItem[] = [
   { value: "devices", label: "devices", description: "List attached devices and their transport serials" },
   { value: "connect", label: "connect", description: "Connect to a device by adb command" },
@@ -553,6 +560,8 @@ function renderAdbControlCall(params: any, theme: any): Component {
     operand = `$ ${stringArg(args.deviceCommand) || "..."}`;
   } else if (action === "connect" || action === "pair" || action === "install" || action === "uninstall") {
     operand = stringArg(args.command) ?? stringArg(args.hostPath) ?? stringArg(args.packageName);
+  } else if (action === "devices") {
+    operand = stringArg(args.command);
   } else if (action === "forward") {
     const forwards = stringArg(args.forwards);
     if (forwards !== undefined) operand = forwards || "...";
@@ -1462,11 +1471,7 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
       "Delete a device-memory JSON entry only after an explicit user request. Read the file first, identify the exact id, remove only that object with edit, and ask if the target is ambiguous.",
     ],
     parameters: Type.Object({
-      action: StringEnum([
-        "connect", "reconnect", "devices", "status", "disconnect", "pair",
-        "forward", "unforward", "exec", "chdir", "note", "memory",
-        "screen", "pull", "push", "install", "uninstall",
-      ] as const),
+      action: StringEnum(ADB_CONTROL_ACTIONS),
       command: Type.Optional(Type.String({ description: "adb endpoint command for connect, such as `adb`, `adb -s <serial>`, or `adb -t <transport_id>`; also selects the endpoint for note or memory" })),
       note: Type.Optional(Type.String({ description: "Endpoint note for the note action; omit or use an empty string to clear it" })),
       cwd: Type.Optional(Type.String({ description: "Device working directory; required for chdir, and a one-command override for exec" })),
@@ -1474,12 +1479,17 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
       deviceCommand: Type.Optional(Type.String({ description: "Device shell command for the exec action (POSIX sh, no `adb shell` prefix)" })),
       timeout: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_DEVICE_TIMEOUT_SECONDS, description: `Device command timeout in seconds; defaults to ${DEFAULT_DEVICE_TIMEOUT_SECONDS}, installs default to ${DEFAULT_INSTALL_TIMEOUT_SECONDS}` })),
       displayLines: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_DISPLAY_LINES, description: "Collapsed visual lines for exec output; defaults to the /adb config display-lines setting (5 initially), maximum 50" })),
-      devicePath: Type.Optional(Type.String({ description: "Absolute path on the device, for screen, pull, push, and the exec file helpers" })),
+      devicePath: Type.Optional(Type.String({ description: "Absolute path on the device, for screen, pull and push; for pair, the `IP:port` shown in the phone's wireless debugging dialog" })),
       hostPath: Type.Optional(Type.String({ description: "Path on this PC (relative paths resolve against the project directory), for screen, pull, push, and install" })),
       packageName: Type.Optional(Type.String({ description: "Application package name, for install verification and uninstall" })),
       overwrite: Type.Optional(Type.Boolean({ description: "Replace an existing destination file; required when pull or push would overwrite" })),
     }),
     async execute(_id, params, _signal, _update, ctx) {
+      // The schema enumerates actions, but constrained sampling is only "preferred": an unknown
+      // action must not fall through to the connect branch at the end of this chain.
+      if (!(ADB_CONTROL_ACTIONS as readonly string[]).includes(params.action)) {
+        throw new Error(`Unknown adb action "${String(params.action)}". Valid actions: ${ADB_CONTROL_ACTIONS.join(", ")}.`);
+      }
       if (params.action === "status") {
         const ports = [...forwardSpecs.keys()].sort((a, b) => a - b);
         const caps = device ? Object.entries(device.capabilities).filter(([, value]) => value === true || value === false).map(([key, value]) => `${key}=${value}`).join(" ") : "";
@@ -1518,7 +1528,14 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
         const code = await askPasscode(ctx, "Pairing code", "");
         if (!code) return connectionErrorResult("Wireless pairing was cancelled.");
         const parsed = parseAdbCommand(lastCommand || activeAdbCommand() || "adb");
-        const paired = await runAdb(subcommandArgv(parsed, undefined, ["pair", target, code]), { timeoutSeconds: 60, maxCaptureBytes: CONTROL_MAX_CAPTURE_BYTES });
+        // The code goes to stdin: `adb pair` prompts "Enter pairing code:" and reads it, which
+        // keeps the secret out of the process argv (world-readable in /proc) and out of Pi's
+        // tool parameters, config, session entries and transcripts.
+        const paired = await runAdb(subcommandArgv(parsed, undefined, ["pair", target]), {
+          timeoutSeconds: 60,
+          maxCaptureBytes: CONTROL_MAX_CAPTURE_BYTES,
+          stdin: Buffer.from(`${code}\n`, "utf8"),
+        });
         const output = `${paired.stdout.toString("utf8")} ${paired.stderr.toString("utf8")}`.trim();
         if (paired.exitCode !== 0 || !/successfully paired/i.test(output)) {
           return connectionErrorResult(`Wireless pairing failed: ${output || `adb exited with code ${paired.exitCode}`}`);
@@ -1574,8 +1591,11 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
         try {
           await state.transport.install(apk, { timeoutSeconds: parseDeviceTimeout(params.timeout ?? DEFAULT_INSTALL_TIMEOUT_SECONDS) });
         } catch (error) {
-          if (error instanceof InstallFailure) {
-            return connectionErrorResult(`${error.message}\nadb never auto-uninstalls: ask the user before adb(action="uninstall").`);
+          // Guidance for anything adb itself rejected (an install code or a failed copy, V26);
+          // a bad local path is the model's own mistake and gets reported bare.
+          const message = error instanceof Error ? error.message : String(error);
+          if (error instanceof InstallFailure || /^adb install failed/.test(message)) {
+            return connectionErrorResult(`${message}\nadb never auto-uninstalls: ask the user before adb(action="uninstall").`);
           }
           throw error;
         }

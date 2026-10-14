@@ -53,6 +53,7 @@ Measured on: **Pixel 3a (`sargo`), Android 12 / API 32, `ro.build.type=user`, `r
 | V33 | `find <dir> -type f -mmin +5 -delete` | deleted an aged file, rc 0, left the rest | staging garbage collection |
 | V34 | `push` of a zero-byte file, then `exec-out head -c` | 0 bytes; `stat` says `regular empty file\|666\|0` | "empty ⇒ error" must be gated on `size > 0` |
 | V35 | `ro.build.type=user`, `ro.debuggable=0`, `ro.secure=1`, `su` absent | confirmed | root path untestable here ⇒ deferred (D9) |
+| V36 | `adb pair <ip:port>` with no code argument prints `Enter pairing code:` and reads the code from stdin; it exits **0** even when pairing is rejected (`error: protocol fault`, `wrong pairing code`) | confirmed on adb 1.0.41 / 35.0.2 against an unreachable host | the code goes to `runAdb`'s stdin, so it never enters argv (readable through `/proc`) nor a tool parameter; pairing success is decided by matching `Successfully paired`, never by exit code |
 
 [HYPOTHESIS — deliberately not provoked]: adb client banner text `* daemon not running; starting now at tcp:5037` and `adb server version (…) doesn't match this client (…); killing...`. Provoking them means `adb kill-server`, which would drop every other tool's device session. Handling is specified defensively in F18; the classifier asserts on the canonical strings only in fixtures.
 

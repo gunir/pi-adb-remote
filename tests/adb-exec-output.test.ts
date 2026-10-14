@@ -22,7 +22,9 @@ function feed(accumulator: DeviceExecAccumulator, text: string, chunkSize = 4096
 
 test("the spill prefix identifies this extension's host scratch", () => {
   assert.ok(scratch.includes(`${OUTPUT_FILE_PREFIX}session-`), scratch);
-  assert.equal(createSessionOutputDir().includes(OUTPUT_FILE_PREFIX), true);
+  const second = createSessionOutputDir();
+  assert.ok(second.includes(`${OUTPUT_FILE_PREFIX}session-`), second);
+  rmSync(second, { recursive: true, force: true });
 });
 
 test("10 000 lines: tail-only model text, complete readable spill file (F24)", () => {

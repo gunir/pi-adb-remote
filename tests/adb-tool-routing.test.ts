@@ -40,8 +40,12 @@ writeFileSync(join(agentDir, "adb-remote-config.json"), `${JSON.stringify({
   endpoints: { adb: { adbCommand: "adb", deviceCwd: workspace } },
 }, null, 2)}\n`);
 
-const scratchDirs = () => readdirSync(tmpdir()).filter((name) => name.startsWith("pi-adb-remote-output-"));
-const leakedBefore = scratchDirs().length;
+// A private TMPDIR keeps every scratch directory this process creates observable and race-free,
+// no matter what other test files are doing in the shared /tmp.
+const privateTmp = join(root, "tmp");
+mkdirSync(privateTmp, { recursive: true });
+process.env.TMPDIR = privateTmp;
+const scratchDirs = () => readdirSync(privateTmp).filter((name) => name.startsWith("pi-adb-remote-"));
 
 const harness = createHarness({ cwd: workspace });
 const { default: adbRemote } = await import("../index.ts");
@@ -50,7 +54,7 @@ adbRemote(harness.api);
 after(async () => {
   // The session_shutdown hook is what cleans the spill directory; a run must not leak one.
   await harness.fire("session_shutdown", { reason: "exit" });
-  assert.equal(scratchDirs().length, leakedBefore, "session_shutdown removed the scratch directory");
+  assert.deepEqual(scratchDirs(), [], "session_shutdown removed the scratch directory");
   rmSync(root, { recursive: true, force: true });
 });
 

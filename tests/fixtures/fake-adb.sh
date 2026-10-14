@@ -16,7 +16,7 @@ fi
 sub=""
 for token in "$@"; do
   case "$token" in
-    devices | get-state | shell | exec-out | push | pull | forward | install | uninstall | start-server | wait-for-device | connect | disconnect | root | usb)
+    devices | get-state | shell | exec-out | push | pull | forward | install | uninstall | start-server | wait-for-device | connect | disconnect | pair | root | usb)
       sub="$token"
       break
       ;;
@@ -80,6 +80,29 @@ case "$sub" in
     ;;
   connect)
     printf 'connected to %s\n' "$last"
+    exit 0
+    ;;
+  pair)
+    # Measured on adb 1.0.41 / 35.0.2: without the code as an argument adb prints
+    # "Enter pairing code:" and reads it from stdin, and it exits 0 even when pairing failed.
+    until [ $# -eq 0 ]; do a="$1"; shift; [ "$a" = pair ] && break; done
+    target="${1:-}"
+    code=$(head -n 1)
+    printf '%s' "$code" > "$FAKE_ADB_ROOT/.fake-pair-code"
+    printf 'Enter pairing code: ' 1>&2
+    if [ -z "$target" ]; then
+      printf 'error: missing pairing target\n' 1>&2
+      exit 1
+    fi
+    if [ -n "${FAKE_ADB_PAIR_ERROR:-}" ]; then
+      printf 'error: %s\n' "$FAKE_ADB_PAIR_ERROR" 1>&2
+      exit "${FAKE_ADB_PAIR_RC:-0}"
+    fi
+    if [ "$code" != "${FAKE_ADB_PAIR_CODE:-12345678}" ]; then
+      printf 'error: wrong pairing code, please check and try again\n' 1>&2
+      exit 0
+    fi
+    printf 'Successfully paired to %s [transport_id=99]\n' "$target"
     exit 0
     ;;
   forward)
@@ -227,6 +250,17 @@ if [ -n "${FAKE_ADB_SHELL_ERROR:-}" ] && { [ "$sub" = "shell" ] || [ "$sub" = "e
 fi
 
 if [ "$sub" = "exec-out" ]; then
+  case "$last" in
+    *screencap*\ -p*|*screencap\ -p*)
+      # V31: the PNG arrives raw on stdout, with no shell v2 protocol framing.
+      if [ -n "${FAKE_ADB_PNG:-}" ] && [ -f "${FAKE_ADB_PNG}" ]; then
+        cat "$FAKE_ADB_PNG"
+      else
+        printf 'screencap: permission denied\n' 1>&2
+      fi
+      exit 0
+      ;;
+  esac
   if [ -n "${FAKE_ADB_EXEC_OUT_EMPTY:-}" ]; then
     # V3 + V34: rc 0 and not a single byte, even though `stat` promised content.
     exit 0
