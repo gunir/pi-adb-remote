@@ -49,7 +49,8 @@ export function createHarness(options: { cwd?: string } = {}): Harness {
     runCommand: async (name, args, ctx) => {
       const command = commands.get(name);
       if (!command) throw new Error(`Command "/${name}" is not registered`);
-      await command.handler({ args, ctx: ctx ?? makeCtx() });
+      // Pi calls command handlers as (args, ctx), positionally.
+      await command.handler(args, ctx ?? makeCtx());
     },
     fire: async (event, payload = {}, ctx) => {
       let last: unknown;

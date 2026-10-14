@@ -1,15 +1,17 @@
 {
-  "name": "pi-ssh-remote",
-  "version": "0.1.15",
-  "description": "Persistent remote SSH workspaces for Pi.",
+  "name": "pi-adb-remote",
+  "version": "0.1.0",
+  "description": "Persistent Android device workspaces for Pi, over ADB.",
   "type": "module",
   "author": "Yutong Bian",
   "license": "MIT",
   "keywords": [
     "pi-package",
     "pi",
-    "ssh",
-    "remote-development"
+    "adb",
+    "android",
+    "android-debug-bridge",
+    "device-workspace"
   ],
   "files": [
     "index.ts",
@@ -24,20 +26,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/petrichor20211/pi-ssh-remote.git"
+    "url": "git+https://github.com/gunir/pi-adb-remote.git"
   },
-  "homepage": "https://github.com/petrichor20211/pi-ssh-remote#readme",
+  "homepage": "https://github.com/gunir/pi-adb-remote#readme",
   "bugs": {
-    "url": "https://github.com/petrichor20211/pi-ssh-remote/issues"
+    "url": "https://github.com/gunir/pi-adb-remote/issues"
   },
   "scripts": {
     "test": "node --test tests/*.test.ts",
     "test:live": "PI_ADB_LIVE=1 node --test tests/live/*.live.test.ts",
     "typecheck": "tsc -p tsconfig.json"
-  },
-  "dependencies": {
-    "ssh-config": "^5.3.0",
-    "ssh2": "^1.17.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

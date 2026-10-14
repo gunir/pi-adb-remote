@@ -43,6 +43,8 @@ emit_props() {
 
 emit_caps() {
   for applet in timeout sed stat grep find; do
+    # FAKE_ADB_MISSING_APPLETS drops applets to emulate a device that lost a tool (F6).
+    case " ${FAKE_ADB_MISSING_APPLETS:-} " in *" $applet "*) continue ;; esac
     printf '@%s\n/system/bin/%s\n' "$applet" "$applet"
   done
   printf '@uid\n2000\n'
@@ -71,7 +73,17 @@ case "$sub" in
     exit 0
     ;;
   get-state)
-    printf '%s\n' "${FAKE_ADB_STATE:-device}"
+    # FAKE_ADB_STATE_TRANSIENT=<n> replays the replug window: the first n reads report the
+    # configured transient state, every later read reports `device` (F25).
+    reported="${FAKE_ADB_STATE:-device}"
+    if [ -n "${FAKE_ADB_STATE_TRANSIENT:-}" ]; then
+      counter="$FAKE_ADB_ROOT/.fake-state-reads"
+      seen=$(cat "$counter" 2>/dev/null || printf 0)
+      seen=$((seen + 1))
+      printf '%s' "$seen" > "$counter"
+      [ "$seen" -le "${FAKE_ADB_STATE_TRANSIENT}" ] || reported="device"
+    fi
+    printf '%s\n' "$reported"
     if [ -n "${FAKE_ADB_STATE_FAILS:-}" ]; then
       printf 'adb: device %s not found\n' "'${FAKE_ADB_STATE_FAILS}'" 1>&2
       exit 1

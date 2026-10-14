@@ -1090,10 +1090,14 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
       return next;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      lastConnectionError = classifyAdbError(message) === "unauthorized" ? recoveryHint("unauthorized", parsed) : message;
+      // Keep the diagnosis and append the one action that fixes it; an `unauthorized` device and
+      // an `offline` one need different answers, and the hint is the part the user must see.
+      const hint = recoveryHint(classifyAdbError(message), parsed);
+      lastConnectionError = message.includes(hint) ? message : `${message}\n${hint}`;
       device = null;
       status(ctx);
-      ctx.ui.notify(`Device connection failed: ${lastConnectionError.split("\n")[0]}`, "error");
+      const visible = lastConnectionError.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 3);
+      ctx.ui.notify(`Device connection failed: ${visible.join("\n")}`, "error");
       return null;
     }
   };
@@ -1139,6 +1143,9 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
     const next = await connectInteractive(command, ctx, saved.cwd);
     if (!next) throw new Error(lastConnectionError || "Device session restore was cancelled or failed");
     if (saved.identity && saved.identity !== next.identity) {
+      // Let go of the wrong phone before reporting it: a refused restore must not leave the
+      // session controlling a device nobody approved (F9, F29).
+      disconnect(ctx);
       throw new Error(`The connected device reports identity "${next.identity}", but this session was saved for "${saved.identity}"; refusing to continue on the wrong phone`);
     }
     routeDeviceTools = saved.routeDeviceTools ?? true;
@@ -1428,6 +1435,22 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
     });
   }
 
+  /**
+   * Wireless pairing. The code is delivered on stdin: `adb pair` prints "Enter pairing code:"
+   * and reads it there, which keeps the secret out of the process argv (world-readable through
+   * /proc) and out of Pi's tool parameters, config, session entries and transcripts. adb exits
+   * 0 even when it rejects the pairing (V36), so the output text decides, never the exit code.
+   */
+  const runPairing = async (target: string, code: string, command: string): Promise<{ ok: boolean; output: string }> => {
+    const paired = await runAdb(subcommandArgv(parseAdbCommand(command), undefined, ["pair", target]), {
+      timeoutSeconds: 60,
+      maxCaptureBytes: CONTROL_MAX_CAPTURE_BYTES,
+      stdin: Buffer.from(`${code}\n`, "utf8"),
+    });
+    const output = `${paired.stdout.toString("utf8")} ${paired.stderr.toString("utf8")}`.trim();
+    return { ok: /successfully paired/i.test(output), output };
+  };
+
   const screenAction = async (params: any, ctx: any) => {
     const state = await ensureDevice(ctx);
     const png = await state.transport.screencap(parseDeviceTimeout(params.timeout ?? DEFAULT_DEVICE_TIMEOUT_SECONDS));
@@ -1527,18 +1550,9 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
         if (!target) return connectionErrorResult("Wireless pairing needs the IP:port shown in the phone's pairing dialog.");
         const code = await askPasscode(ctx, "Pairing code", "");
         if (!code) return connectionErrorResult("Wireless pairing was cancelled.");
-        const parsed = parseAdbCommand(lastCommand || activeAdbCommand() || "adb");
-        // The code goes to stdin: `adb pair` prompts "Enter pairing code:" and reads it, which
-        // keeps the secret out of the process argv (world-readable in /proc) and out of Pi's
-        // tool parameters, config, session entries and transcripts.
-        const paired = await runAdb(subcommandArgv(parsed, undefined, ["pair", target]), {
-          timeoutSeconds: 60,
-          maxCaptureBytes: CONTROL_MAX_CAPTURE_BYTES,
-          stdin: Buffer.from(`${code}\n`, "utf8"),
-        });
-        const output = `${paired.stdout.toString("utf8")} ${paired.stderr.toString("utf8")}`.trim();
-        if (paired.exitCode !== 0 || !/successfully paired/i.test(output)) {
-          return connectionErrorResult(`Wireless pairing failed: ${output || `adb exited with code ${paired.exitCode}`}`);
+        const paired = await runPairing(target, code, lastCommand || activeAdbCommand() || "adb");
+        if (!paired.ok) {
+          return connectionErrorResult(`Wireless pairing failed: ${paired.output || "adb reported no success"}`);
         }
         return connectionResult(`Paired with ${target}. Connect with adb(action="connect", command="adb -s ${target}").`);
       }
@@ -1693,7 +1707,7 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("adb", {
-    description: `Connect to an Android device and manage endpoints: /adb | devices | connect [adb ...] | use <endpoint> | screen [PC_PATH] | pull DEVICE [PC_PATH] | push PC_PATH DEVICE | install APK | uninstall PACKAGE | exec [--timeout SECONDS] [--lines N] COMMAND | cd PATH | forward [MAPPINGS] | unforward | pair | status | reconnect | disconnect | memory | config note TEXT|--clear | config cwd PATH | config display-lines N | config read-max-lines|read-max-bytes|exec-max-lines|exec-max-bytes|turn-max-bytes|image-max-bytes N | config forward MAPPINGS`,
+    description: `Connect to an Android device and manage endpoints: /adb | devices | connect [adb ...] | use <endpoint> | screen [PC_PATH] | pull DEVICE [PC_PATH] | push PC_PATH DEVICE | install APK | uninstall PACKAGE | exec [--timeout SECONDS] [--lines N] [--] COMMAND | cd PATH | forward [MAPPINGS] | unforward | pair | status | reconnect | disconnect | memory | config note TEXT|--clear | config cwd PATH | config display-lines N | config read-max-lines|read-max-bytes|exec-max-lines|exec-max-bytes|turn-max-bytes|image-max-bytes N | config forward MAPPINGS`,
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => getDeviceArgumentCompletions(prefix),
     handler: async (args, ctx) => {
       const input = args.trim().replace(/^\/?adb(?:\s+|$)/i, "").trim();
@@ -1946,10 +1960,9 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
         const code = await askPasscode(ctx, "Pairing code", "");
         if (!code) { ctx.ui.notify("Pairing cancelled", "info"); return; }
         try {
-          const paired = await runAdb(subcommandArgv(parseAdbCommand(lastCommand || "adb"), undefined, ["pair", target, code]), { timeoutSeconds: 60, maxCaptureBytes: CONTROL_MAX_CAPTURE_BYTES });
-          const output = `${paired.stdout.toString("utf8")} ${paired.stderr.toString("utf8")}`.trim();
-          if (paired.exitCode === 0 && /successfully paired/i.test(output)) ctx.ui.notify(`Paired with ${target}; connect with /adb connect adb -s ${target}`, "info");
-          else ctx.ui.notify(`Pairing failed: ${output || `adb exited with code ${paired.exitCode}`}`, "error");
+          const paired = await runPairing(target, code, lastCommand || activeAdbCommand() || "adb");
+          if (paired.ok) ctx.ui.notify(`Paired with ${target}; connect with /adb connect adb -s ${target}`, "info");
+          else ctx.ui.notify(`Pairing failed: ${paired.output || "adb reported no success"}`, "error");
         } catch (error) { ctx.ui.notify(`Pairing failed: ${(error as Error).message}`, "error"); }
         return;
       }
@@ -1960,8 +1973,13 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
           let displayLines = configuredDisplayLines();
           let timeoutSeconds = DEFAULT_DEVICE_TIMEOUT_SECONDS;
           while (execInput.startsWith("--")) {
+            if (/^--(\s|$)/.test(execInput)) {
+              // `--` ends the option list, so a device command may start with anything.
+              execInput = execInput.replace(/^--\s*/, "");
+              break;
+            }
             const option = execInput.match(/^--(lines|timeout)\s+(\S+)\s+([\s\S]+)$/i);
-            if (!option) throw new Error("Expected --lines N or --timeout SECONDS followed by a command");
+            if (!option) throw new Error("Expected --lines N, --timeout SECONDS or -- followed by a command");
             if (option[1]!.toLowerCase() === "lines") displayLines = parseDisplayLines(option[2]);
             else timeoutSeconds = parseDeviceTimeout(option[2]);
             execInput = option[3]!;
@@ -2004,7 +2022,8 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
       }
       if (/^cd(?:\s+|$)/i.test(input)) {
         if (!device) { ctx.ui.notify("Connect to a device first", "error"); return; }
-        const requested = input.replace(/^cd\s*/i, "").trim() || DEFAULT_DEVICE_CWD;
+        // Empty target is resolved by changeDeviceCwd: the endpoint cwd, not a hardcoded default.
+        const requested = input.replace(/^cd\s*/i, "").trim();
         try {
           const resolved = await changeDeviceCwd(requested, ctx);
           ctx.ui.notify(`Device path: ${resolved}`, "info");
