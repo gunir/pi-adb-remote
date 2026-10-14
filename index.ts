@@ -826,8 +826,9 @@ class SecretInput implements Component, Focusable {
 
 async function askSecret(ctx: any, label: string, placeholder: string): Promise<string | null> {
   if (ctx.mode !== "tui") return (await ctx.ui.input(`${label}:`, placeholder)) ?? null;
-  return ctx.ui.custom<string | null>((tui: any, _theme: any, _keys: any, done: (value: string | null) => void) =>
+  const value = await ctx.ui.custom((tui: any, _theme: any, _keys: any, done: (value: string | null) => void) =>
     new SecretInput(label, done, () => tui.requestRender()));
+  return value as string | null;
 }
 
 export default function sshRemoteExtension(pi: ExtensionAPI) {

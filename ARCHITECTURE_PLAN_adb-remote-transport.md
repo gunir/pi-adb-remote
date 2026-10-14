@@ -449,11 +449,20 @@ params: command? cwd? remoteCommand? forwards? timeout? displayLines?
 
 Pi's `grep`/`find`/`ls` run host ripgrep/fd; their `operations` hooks only expose `isDirectory`/`readFile`/`glob` (`dist/core/tools/grep.d.ts:28-37`), so they cannot be redirected. Default coding set is `read bash edit write` [VERIFIED `createCodingTools`], but the others are opt-in, and enabling one yields **PC results while the model believes it is on the phone**.
 
-**Spike SPIKE-4A (build step 1, before any code):** with this extension installed, run `pi --exclude-tools ls,grep,find` and inspect the live tool list to determine whether an extension registering those names **re-adds** a user-disabled tool. Record the result as one machine-readable line in this file, which step 7 greps:
+**Spike SPIKE-4A (build step 1, before any code):** with this extension installed, run `pi --exclude-tools ls,grep,find` and inspect the live tool list to determine whether an extension registering those names **re-adds** a user-disabled tool. Recorded result:
 
 ```
-SPIKE-4A-RESULT: readds | ok
+SPIKE-4A-RESULT: ok
 ```
+
+Executed on pi 1.1.0 (`dist/core/agent-session.js`), probe extension registering a tool literally named `grep`:
+
+| Run | `pi.getActiveTools()` | Interpretation |
+|---|---|---|
+| `pi -e probe.ts --exclude-tools ls,grep,find` | `read, bash, edit, write` | extension `grep` filtered out — a user-disabled tool is **not** re-added |
+| `pi -e probe.ts` (control) | `read, bash, edit, write, grep` | registration works and shadows the built-in `grep` |
+
+Mechanism, confirmed statically: `registerTool` (`dist/core/extensions/loader.js:231`) calls `runtime.refreshTools()` → `AgentSession._refreshToolRegistry`, which filters every extension/custom tool through `_isAllowedTool` (`agent-session.js:2821`); `_isAllowedTool` returns false for any name matched by `--exclude-tools` (`agent-session.js:1118-1124`). Exclusion is therefore enforced by pi, not by us ⇒ **`ok`** ⇒ build step 7 registers the three guards.
 
 **Default (pre-committed, per the red-team):** `readds` ⇒ **no guard registrations**; guidance only, in the routed tools' `description` and in `adbWorkspacePrompt`: "with device routing active, `ls`/`grep`/`find` search the PC — use `bash` with toybox `ls -la` / `grep -R -n -E PATTERN DIR` / `find DIR -maxdepth N -name GLOB` (all verified present, V12)." `ok` ⇒ register the three guards as thin refusers that delegate to the local tools when routing is off. A full device-backed implementation of the three remains deferred.
 
