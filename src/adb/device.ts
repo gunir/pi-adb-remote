@@ -452,7 +452,8 @@ export function recoveryHint(failure: AdbFailure, device: ParsedDevice): string 
     case "forward-rebind":
       return `That forward is already registered by another adb client; pick a different local port.`;
     case "other":
-      return `adb command for "${target}" failed.`;
+      // Unclassified adb failure: the diagnosis is the message, so the hint is the next probe.
+      return `adb did not classify this failure. Check adb(action="devices") and retry a read-only command before touching the device again.`;
   }
 }
 

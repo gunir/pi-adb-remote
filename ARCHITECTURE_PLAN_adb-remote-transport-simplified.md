@@ -1,6 +1,9 @@
 # PLAN — switch `pi-ssh-remote` from SSH to adb (in place)
 
-Status: **v4 (simplified)**. Supersedes v3, which planned a renamed fork with ~10 new modules. This version modifies the existing package in place and changes only what the transport swap requires.
+Status: **v4 (simplified) — retained as an alternative, not what shipped.** The repository implements
+`ARCHITECTURE_PLAN_adb-remote-transport.md` (v3): the package is the renamed artifact `pi-adb-remote`, the
+SSH stack is deleted, and the transport lives in `src/adb/*`. Read that file for the design that the code
+follows; this document is kept for the record and must not be used as instructions.
 
 ## 1. Goal and scope
 

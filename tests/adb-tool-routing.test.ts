@@ -169,8 +169,8 @@ describe("adb tool routing against the fake device", () => {
     const started = Date.now();
     await assert.rejects(
       () => harness.callTool("bash", { command: "sleep 30", timeout: 1 }),
-      /Command timed out after 1 seconds/,
-      "the device `timeout` wrapper is reported as a timeout, not a crash",
+      /Command timed out after 1 seconds on the device; the command may have partially run, so check device state before retrying a write\./,
+      "the device `timeout` wrapper is reported as a device timeout, with the retry guidance",
     );
     assert.ok(Date.now() - started < 15_000, "the device timeout ended the command, not the host grace period");
     const after = await harness.callTool("bash", { command: "wc -l < range.txt" });

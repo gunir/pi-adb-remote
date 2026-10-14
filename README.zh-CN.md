@@ -1,359 +1,210 @@
 <!--
-pi-ssh-remote 中文说明文档，重点介绍它面向 Pi Agent 的设计、主要能力、常见使用场景、命令和安全机制。
+面向 Agent 的中文文档：pi-adb-remote 在 Android 设备上做什么、如何把 Pi 的工具路由到设备、
+完整的命令与 action、配置项、会话行为、安全边界与故障排查。与 README.md 语义一致。
 -->
 
-# pi-ssh-remote
+# pi-adb-remote
 
-**让 Pi 像操作本地项目一样操作远程服务器。**
+**把 Android 设备变成 Pi 的工作区——走 `adb`，不是 SSH。**
 
-[English Docs](README.md) · [社区](https://linux.do/)
+[English](README.md) · [更新日志](CHANGELOG.md)
 
-`pi-ssh-remote` 是一个专门面向 Pi Agent 的 SSH 远程开发插件。
-
-它不只是帮你打开一个远程终端。连接服务器后，Pi 原有的 `read`、`write`、`edit`、`bash` 等工具会自动切换到远端。Agent 不需要反复拼接 SSH 命令，也不需要先把代码下载到本地再修改，可以直接在服务器上查看文件、分析日志、修改代码和运行任务。
-
-例如，你可以直接对 Pi 说：
+`pi-adb-remote` 把手机或模拟器变成 Pi 的当前工作区。连接之后，Pi 仍然使用它自己的 `read`、`write`、`edit`、
+`bash`、`ls`、`grep`、`find` 工具——但这些操作发生在设备上。没有人需要把命令包成 `adb shell`，不需要来回拷文件，
+模型也不必同时维护两套 shell 的心智模型。
 
 ```text
-连接 ssh root@gpu-box -p 2202，进入 /srv/training。
-检查最近一次训练为什么失败，修复问题后在后台重新启动，
-最后把 PID 和日志路径发给我。
+你：连我的 Pixel，打开 /data/local/tmp/logs，找出上一次采集为什么失败，
+    改配置，然后重跑，把日志路径给我。
+
+Pi：adb connect → pwd → ls logs → 读最新日志 → 改配置 →
+    重跑采集 → 把结果 pull 回电脑
 ```
 
-Pi 会依次完成连接服务器、切换目录、读取日志、修改文件和启动任务。整个过程中，它使用的仍然是熟悉的 Pi 工具，只是执行位置变成了远程服务器。
+所有操作都以 shell 用户（`uid 2000`）身份执行：不需要 root，不需要 Magisk，手机上也不用装任何 App。
 
-## 为什么它更适合 Agent
+## 环境要求
 
-### 不需要给每一步都套一层 SSH
+| 要求 | 说明 |
+| --- | --- |
+| 已加载本扩展的 Pi | `pi install npm:pi-adb-remote`，或放进 `~/.pi/agent/extensions/` |
+| Android platform-tools | `adb` 在 `PATH` 中（测试或自定义构建可用 `ADB` 覆盖） |
+| 已开启 USB 调试的设备 | 或使用无线调试；无线配对需要 Android 11+ |
+| Node.js ≥ 20 | Pi 的 TypeScript 加载器运行本扩展 |
 
-普通做法通常是让 Agent 不断执行：
+## 连接之后有什么不同
+
+| Pi 做的事 | 实际执行位置 |
+| --- | --- |
+| `read`、`write`、`edit` | 设备文件系统，相对设备工作目录解析 |
+| `bash` | 每条命令一次 `adb shell`，退出码与超时都保留 |
+| `ls`、`grep`、`find` | 在设备上，使用设备自带的 `sh` 兼容搜索工具 |
+| `!ls`（你的 `!` 终端命令） | 在设备上，包括会持久生效的 `cd` |
+| `adb` | 设备控制面：连接、截屏、文件、APK、端口、备注、记忆 |
+| `/adb` | 同样的控制面给你用，带 Tab 补全 |
+
+其它一切都不动。你的电脑工作目录、Pi 自己的文件、其它扩展都不受影响，所以一个刷镜像、改 init 脚本、
+再 grep `logcat` 的会话全程不需要离开当前项目。
+
+## 连接
+
+```text
+/adb                          连接已保存（活动）的 endpoint
+/adb 0A1B2C3D4E5F6            连接序列号 → 规范化为 `adb -s 0A1B2C3D4E5F6`
+/adb use pixel-test           切换到已保存的 endpoint
+/adb devices                  adb 能看到什么
+/adb pair 192.168.1.20:37021  无线配对（配对码在提示框输入，绝不保存）
+/adb status                   设备、路由、cwd、输出预算、forward、备注
+/adb disconnect               回到本地工作区
+```
+
+也可以直接对 Pi 说，由 Agent 调用 `adb` 工具：
+
+```json
+{ "action": "connect", "command": "adb -s 0A1B2C3D4E5F6" }
+```
+
+`adb` 是一个工具、一组扁平的 action，模型只面对一个表面，不会有好几个相似工具可选：
+
+| Action | 作用 |
+| --- | --- |
+| `connect`、`reconnect`、`disconnect` | endpoint 生命周期（绝不自动挑设备） |
+| `devices`、`status` | adb 看到什么 / 本会话正在做什么 |
+| `pair`、`forward`、`unforward` | 无线配对，把设备端口暴露成本机 `localhost:<port>` |
+| `exec` | 单条设备命令，带完整输出信封 |
+| `chdir` | 持久修改设备工作目录 |
+| `screen` | 实时 PNG 截屏（图像块），并在电脑上留一份 |
+| `pull`、`push` | 设备 ↔ 电脑，支持目录 |
+| `install`、`uninstall` | 安装 APK；`uninstall` 一定先问你 |
+| `note`、`memory` | endpoint 备注 / 按设备保存的长期笔记 |
+
+设备文件用绝对路径寻址；相对路径相对设备工作目录解析。单条设备命令可以在命令行上限幅：
+
+```text
+/adb exec getprop ro.build.version.release
+/adb exec --timeout 120 dumpsys activity recents
+/adb exec --lines 20 logcat -d -v brief
+/adb exec -- grep -c . /data/local/tmp/notes.txt
+```
+
+## 设备不是一台 Linux 服务器
+
+传输层是围绕 `adb` 的真实能力建的，差异会被说明，而不是被藏起来：
+
+- **只有一个 `sh`，没有 PTY。** 命令被组织成
+  `adb -s <serial> exec-out "sh -c '<argv-safe command>'"`——一帧完成，调用方不拼 shell 字符串，
+  退出码走独立通道，所以 shell 的最后一句话伪造不了成功。
+- **没有 `bash`，没有 GNU 工具。** 只有 Toybox：`timeout -k 5 -s TERM N`（只支持短选项）、用
+  `sed -n 'a,bp'` 取行区间、用 `stat -L -c '%F|%a|%s'` 取元数据。缺失的 applet 会被报告，而不是模拟。
+- **可写目录只有 `/data/local/tmp` 及其子目录。** 这是默认设备工作区，会话可以在其中移动
+  （`/adb cd /data/local/tmp/repo`）；`/sdcard` 写入失败会被说明为 FUSE/SELinux 边界，而不是推给扩展。
+- **文本还是二进制由内容决定。** 先嗅探前 8 KB，再决定是拒绝、按区间读，还是流式处理；大二进制永远不会被灌进上下文。
+- **截图与 APK 按字节处理**，绝不当文本：`screen` 返回模型真正能“看见”的 PNG 图像块，同时在电脑的会话临时目录留一份。
+
+## 安全边界
+
+- **不静默换设备。** 会话绑定设备身份（`ro.serialno`）。如果接上的不是保存过的那台，扩展会拒绝并停止路由。
+- **不重试写操作。** 超时或掉线只报告“结果未知”；只有只读类操作会自动重试，重连由单飞 Promise 共享。
+- **不擅自卸载或覆盖。** `uninstall` 需要你的确认；`push`、`pull` 未经同意不覆盖已有文件。
+- **配对码不进 argv**、上下文、配置与会话记录——它只通过 stdin 交给 `adb pair`。
+- **输出天然有界**：单次命令的字节与行数预算、每轮模型输出总预算，超额的完整输出 spill 到电脑上的文件。
+
+## 配置
+
+`~/.pi/agent/adb-remote-config.json`，每个 endpoint 一条；机器状态，用 `/adb config` 写就好。
+
+```json
+{
+  "activeEndpoint": "adb -s 0A1B2C3D4E5F6",
+  "endpoints": {
+    "adb -s 0A1B2C3D4E5F6": {
+      "adbCommand": "adb -s 0A1B2C3D4E5F6",
+      "deviceCwd": "/data/local/tmp",
+      "note": "test Pixel",
+      "forwards": ["19000:tcp:5555"],
+      "imageMaxBytes": 8388608
+    }
+  },
+  "displayLines": 5,
+  "readMaxBytes": 16384,
+  "readMaxLines": 400,
+  "execMaxBytes": 8192,
+  "execMaxLines": 200,
+  "turnMaxBytes": 32768
+}
+```
+
+| 键 | 作用域 | 默认 | 含义 |
+| --- | --- | --- | --- |
+| `activeEndpoint` | 全局 | 最近连接 | 裸 `/adb` 与新会话使用的 endpoint |
+| `adbCommand` | endpoint | `adb` | 完整选择命令（`adb`、`adb -s <serial>`） |
+| `deviceCwd` | endpoint | `/data/local/tmp` | 持久设备工作目录 |
+| `note` | endpoint | — | 设备备注，显示在 `status` 与设备列表中 |
+| `forwards` | endpoint | 无 | 每次连接时恢复的 forward |
+| `imageMaxBytes` | endpoint | 8 MB | `read` 工具可接受的最大图像（上限 64 MB） |
+| `displayLines` | 全局 | 5（最大 50） | 折叠显示的设备命令行数 |
+| `readMaxBytes` / `readMaxLines` | 全局 | 16 KB / 400 | `read` 默认区间 |
+| `execMaxBytes` / `execMaxLines` | 全局 | 8 KB / 200 | 设备命令默认输出 |
+| `turnMaxBytes` | 全局 | 32 KB | 每轮设备输出总预算（单次不低于 1 KB） |
+
+通过命令修改，它会校验并保存：
+
+```text
+/adb config                                    打印全部配置
+/adb config note "training phone"              endpoint 备注
+/adb config cwd /data/local/tmp/repo           默认设备目录
+/adb config forward 19000:tcp:5555             持久保存 forward
+/adb config display-lines 12                   折叠显示行数
+/adb config read-max-bytes 65536               单次读取字节预算
+/adb config turn-max-bytes 65536               每轮输出预算
+/adb config image-max-bytes 2097152            read 可接受的最大图像
+```
+
+## 会话与状态
+
+| 事件 | 行为 |
+| --- | --- |
+| `/new` | 继承当前连接与路由（ scratch 目录重建） |
+| `/fork`、`/clone` | 保留来源会话的设备、目录与路由 |
+| `/resume` | 重连并恢复记录的目录、路由与 forward——换手机会被拒绝 |
+| reload | 进程内保留连接；forward 重新登记而不会翻倍 |
+| 退出 | 停止 forward、删除会话 scratch 目录、保存最后的 endpoint |
+
+设备笔记（`/adb memory`、`adb(action="memory")`）保存在**电脑**上，按设备身份归档，并作为设备记忆上下文注入：
+今天写的笔记，下次这台手机在任何项目里连上时都可用——不需要回到主机，也没有 `scp`。
+
+## 故障排查
+
+| 提示 | 含义 |
+| --- | --- |
+| `no devices/emulators found` | 查数据线、USB 调试、`adb devices`——endpoint 名字变不出设备 |
+| `unauthorized` | 在手机上接受“允许 USB 调试”弹窗 |
+| `device offline` | 手机还在稳定中；扩展会轮询 5 秒，然后提示你解锁并重插 |
+| `more than one device/emulator` | 两个选择器冲突；`adb kill-server` 后显式指定 endpoint |
+| `adb server version mismatch` | 升级 platform-tools；扩展会提示重启 server |
+| `Local port N is already forwarded or in use` | 端口被别的工具占用——扩展只处理自己登记的 forward |
+| `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 签名不同；先问用户再执行 `adb(action="uninstall")` |
+| `screencap: permission denied` / 返回错误而不是 PNG | 屏幕被锁定，解锁后重试 |
+| `Refusing to read device binary file as text` | 正确行为；改用 `pull`（图像用 `screen`） |
+
+## 开发
 
 ```bash
-ssh user@host "cd /path && ..."
+npm run typecheck                  # 类型
+npm test                           # 离线套件：脚本化的假 adb，不需要设备
+PI_ADB_LIVE=1 npm run test:live    # 可选：对着真实设备运行
 ```
 
-命令一多，目录、引号、环境变量和连接状态都很容易出错。使用本插件后，只需要连接一次，后续文件读写和 Shell 操作都会自动在远端执行。
+离线套件是发布门槛，CI 上无设备即可运行。实时套件在缺少环境变量或缺少设备时会自动跳过，并且会自行清理手机。
+实测设备事实、故障目录与构建顺序记录在
+[`ARCHITECTURE_PLAN_adb-remote-transport.md`](ARCHITECTURE_PLAN_adb-remote-transport.md)。
 
-### Agent 知道自己正在操作哪台服务器
+## 版本
 
-插件会把当前远程目录和服务器信息写入 Pi 的上下文，并显示在底部状态栏：
+| 版本 | 状态 | 摘要 |
+| --- | --- | --- |
+| [0.1.0](CHANGELOG.md#unreleased) | 开发中 | `pi-adb-remote` 首个版本：以 Android 设备传输层取代 SSH 工作区，设备化文件/命令/搜索工具，`adb` 控制工具与 `/adb` 命令 |
 
-```text
-H100 训练机 (root@gpu-box.example.com:2202):/srv/project
-```
+## 许可
 
-这样无论是用户还是 Agent，都能随时确认当前操作发生在本地还是远端，减少误操作。
-
-### 服务器配置会保留
-
-每台服务器都可以单独保存：
-
-- SSH 地址；
-- 默认工作目录；
-- 服务器备注；
-- 服务器特定记忆；
-- 端口转发配置。
-
-例如可以把几台机器分别备注为 `8xH100 训练机`、`预发布环境`、`线上只读机`。这些配置保存在本地，重启 Pi 后仍然存在。
-
-### 断线后可以自动恢复
-
-当前会话中如果 SSH 连接意外断开，插件会尝试自动重连，不需要 Agent 从头建立工作环境。SSH 工作区状态也会跟随 Pi session：`/new` 继承当前工作区，`/fork` 和 `/clone` 保留来源工作区，`/resume` 恢复目标历史 session 记录的服务器、远程目录、路由模式和端口转发。
-
-### 对 Agent 上下文更友好
-
-远程命令默认 30 秒超时，避免某个前台任务长期占住 Agent。远程文本读取会按范围获取，不再先下载完整文件；命令输出通过有界缓冲流式处理；同一轮远端工具共享 32 KB 输出预算，避免并行调用迅速占满上下文。超限命令的完整输出会保存到权限受限的临时文件，方便后续按需检查。
-
-### 可以远端跑服务、本地改代码
-
-端口转发模式下，可以把远端服务映射到 `localhost`，同时让 Pi 的文件和 Shell 工具继续操作本地项目。
-
-这很适合下面这类场景：
-
-- GPU 服务器运行模型，本地开发 Web UI；
-- 远端启动 API，本地调试客户端；
-- 远端运行训练监控，本地查看页面；
-- 内网服务通过 SSH 隧道提供给本地工具使用。
-
-## 和直接使用 SSH 有什么区别
-
-| 直接执行 SSH | 使用 `pi-ssh-remote` |
-|---|---|
-| 每条命令都要重新拼接 SSH | 连接一次后，Pi 工具自动在远端执行 |
-| 多次调用之间容易丢失目录 | 自动记住远程工作目录 |
-| Agent 需要自己判断当前在哪台机器 | 系统上下文和底部状态栏会显示当前服务器 |
-| 连接中断后需要手动恢复 | 当前会话内自动重连 |
-| 文件修改、命令执行和端口转发各自处理 | 统一通过 `/remote` 和 Agent 工具管理 |
-| 大量输出可能直接占满模型上下文 | 内置超时、折叠预览和输出上限 |
-
-## 安装
-
-```bash
-pi install npm:pi-ssh-remote
-```
-
-本地要求 Node.js 20+。远程服务器需要提供 Bash、SFTP 和 GNU `timeout`。
-
-## 快速开始
-
-连接服务器：
-
-```text
-/remote ssh root@gpu-box.example.com -p 2202
-```
-
-设置远程工作目录和备注：
-
-```text
-/remote cd /srv/project
-/remote config note H100 训练机
-```
-
-查看当前状态：
-
-```text
-/remote status
-```
-
-连接成功后，Pi 的文件和 Shell 工具都会操作远程 `/srv/project`。
-
-需要返回本地时执行：
-
-```text
-/remote disconnect
-```
-
-### 服务器记忆
-
-直接告诉 Pi 要为当前服务器记住什么：
-
-```text
-记住这台服务器使用 /opt/conda/bin/python，不要停止共享任务。
-```
-
-查看已有记忆和 ID：
-
-```text
-/remote memory
-```
-
-通过 ID 修改或删除：
-
-```text
-把记忆 deploy-command 改为使用 /opt/deploy/v2/run.sh。
-删除记忆 obsolete-proxy-rule。
-```
-
-以后连接这台服务器时，Pi 会自动使用这些记忆。只有明确要求删除时才会删除。
-
-### 使用私钥文件登录
-
-通过 `-i` 指定本地私钥：
-
-```text
-/remote ssh -i ~/.ssh/id_ed25519 root@gpu-box.example.com -p 2202
-```
-
-密钥路径必须是绝对路径或以 `~/` 开头。插件支持未加密私钥和带 passphrase 的私钥；对于加密私钥，Pi 会以遮罩方式询问 passphrase，并仅在当前进程内缓存以便自动重连，`/remote forget` 会清除它。指定 `-i` 后只使用该私钥，不会静默回退到 SSH Agent 或密码；不带 `-i` 时，每台主机依次尝试 SSH Agent、配置或默认私钥，最后才使用缓存密码或询问密码。默认私钥为 `~/.ssh/id_ed25519`、`~/.ssh/id_ecdsa` 和 `~/.ssh/id_rsa`，不存在的文件会跳过。
-
-## 常见用法
-
-### 1. 让 Pi 直接排查远程服务故障
-
-```text
-连接 ubuntu@training.example.com，进入 /opt/app。
-先检查部署日志和 Git 状态，找出失败原因。
-如果需要修改代码，先说明原因，再做最小修改并运行相关测试，
-最后把 diff 和测试结果发给我。
-```
-
-连接完成后，Pi 后续的读文件、查日志、改代码和跑测试都会直接在服务器上进行。
-
-### 2. 启动长时间训练任务
-
-```text
-在当前远程服务器检查训练命令和配置。
-确认无误后用 nohup 在后台启动，并从一开始就重定向 stdout 和 stderr。
-把 PID、输出目录和日志路径发给我，再检查一次进程是否仍在运行、日志是否已经开始写入。
-```
-
-插件默认限制前台命令的执行时间，但通过 `nohup` 等方式启动的后台任务可以继续在服务器运行。
-
-### 3. 管理多台服务器
-
-先配置训练机：
-
-```text
-/remote ssh root@10.0.0.21 -p 22
-/remote config note 8xH100 训练机
-/remote config cwd /srv/train
-```
-
-再配置预发布服务器：
-
-```text
-/remote ssh ubuntu@staging.example.com -p 2222
-/remote config note 预发布 API
-/remote config cwd /opt/service
-```
-
-查看并切换服务器：
-
-```text
-/remote config
-/remote use root@10.0.0.21:22
-/remote
-```
-
-备注和默认目录会按 `user@host:port` 分别保存，不会互相覆盖。
-
-### 4. 远端启动模型，本地开发界面
-
-保存并启动端口转发：
-
-```text
-/remote config forward 7860:127.0.0.1:7860
-/remote forward
-```
-
-现在访问本地 `localhost:7860`，实际连接的是远程服务器上的 7860 端口；与此同时，Pi 的文件和 Shell 工具会留在本地，方便继续修改前端或客户端代码。
-
-停止转发：
-
-```text
-/remote unforward
-```
-
-### 5. 直接用自然语言操作
-
-不想记命令时，可以直接告诉 Pi：
-
-```text
-连接已配置的远程服务器，进入 /srv/api，然后检查 Git 状态。
-```
-
-```text
-把当前服务器备注为“线上只读机”，然后告诉我现在操作的是哪台服务器。
-```
-
-```text
-把远端 8000 端口转发到本地 8000，但代码工具继续留在本地。
-```
-
-## 命令说明
-
-| 命令 | 作用 |
-|---|---|
-| `/remote ssh USER@HOST -p PORT [-i KEY]` | 保存并使用 SSH 配置、Agent、私钥或密码连接服务器 |
-| `/remote` | 连接当前选中的服务器，或提示输入 SSH 地址 |
-| `/remote config` | 查看已保存的服务器和配置 |
-| `/remote use USER@HOST:PORT` | 切换到指定服务器 |
-| `/remote config note TEXT` | 给当前服务器添加或修改备注 |
-| `/remote config note --clear` | 清除当前服务器备注 |
-| `/remote memory` | 展示当前服务器的记忆条目和 ID |
-| `/remote config cwd PATH` | 设置默认远程工作目录 |
-| `/remote cd PATH` | 切换当前远程目录并保存 |
-| `/remote config forward MAPPING...` | 保存端口转发配置，例如 `7860:127.0.0.1:7860` |
-| `/remote forward [MAPPING...]` | 启动端口转发，并让 Pi 工具留在本地 |
-| `/remote unforward` | 停止插件创建的端口转发 |
-| `/remote exec COMMAND` | 在当前远程目录执行一次命令 |
-| `/remote exec --timeout 60 COMMAND` | 单独设置本次命令的超时时间 |
-| `/remote exec --lines 20 COMMAND` | 单独设置本次折叠显示的行数 |
-| `/remote config display-lines 10` | 设置默认折叠显示行数（最大 50） |
-| `/remote config read-max-lines 400` | 设置远端读取行数预算 |
-| `/remote config read-max-bytes 16384` | 设置远端读取字节预算 |
-| `/remote config exec-max-lines 200` | 设置远端命令行数预算 |
-| `/remote config exec-max-bytes 8192` | 设置远端命令字节预算 |
-| `/remote config turn-max-bytes 32768` | 设置每轮远端工具总输出预算 |
-| `/remote status` | 查看连接状态、完整 SSH 命令和工作目录 |
-| `/remote reload` / `/remote reconnect` | 恢复保存的工作区，支持断开后重连 |
-| `/remote disconnect` | 断开连接并返回本地 |
-| `/remote forget` | 断开连接并清除内存中的密码和密钥 passphrase |
-
-## 配置保存在哪里
-
-服务器配置保存在本地：
-
-```text
-~/.pi/agent/ssh-remote-config.json
-```
-
-全局配置包括：
-
-- 已保存的服务器；
-- 当前选中的服务器；
-- 服务器备注；
-- 默认远程目录；
-- 端口转发配置；
-- 私钥文件路径；
-- 命令预览设置；
-- 模型输出预算。
-
-此外，每个 Pi session 都会记录不含凭据的 SSH 工作区元数据，用于在 `/resume` 时恢复该历史 session 对应的服务器环境。
-
-私钥内容、密码和密钥 passphrase 都不会写入配置文件。插件仅在连接时从本地读取私钥；手动输入的密码和 passphrase 只会缓存在当前 Pi 进程的内存中。
-
-## 安全与输出限制
-
-- 第一次连接新服务器时，需要确认主机密钥；
-- 主机密钥发生变化时，会再次要求确认；
-- 远程命令默认 30 秒超时；
-- 远程文本读取默认最多返回 400 行或 16 KB，并支持通过 `offset`/`limit` 继续读取；
-- 远程命令默认最多返回最后 200 行或 8 KB；
-- 同一轮所有远端工具默认共享 32 KB 模型输出预算；
-- 文本范围读取不会先通过 SFTP 下载完整远程文件；
-- 超限命令会流式写入权限受限的本地临时文件，不在内存中累积完整输出；
-- 各项限制可以配置，但不能超过扩展的硬安全上限；
-- 折叠显示行数最大为 50，只影响界面，不会增加模型输出。
-
-## 跳板机（ProxyJump）
-
-无需手动创建本地 SSH 隧道，可直接通过一个或多个跳板机连接：
-
-```text
-/remote ssh -J bastion@gateway.example.com:2222 developer@dev.internal
-/remote ssh -J bastion@gateway.example.com,relay@relay.internal developer@dev.internal
-/remote ssh -o ProxyJump=bastion@gateway.example.com developer@dev.internal
-```
-
-每一跳独立确认主机密钥、解析 SSH 配置并认证。`-i` 只用于目标主机；跳板机使用自己的配置／默认私钥或 SSH Agent。没有命令行或配置覆盖时，跳板端口默认为 22，用户名默认为本地用户名，而非目标主机用户名。IPv6 跳板地址使用方括号，例如 `user@[2001:db8::1]:2222`。
-
-重连会重新建立同一路径；断开会关闭整条连接链；`/remote forget` 也会清除该路径中跳板机的缓存凭据。跳板服务器必须允许向下一跳转发 TCP 连接。任何跳板失败时都不会回退为直连。
-
-## 当前限制
-
-连接仍使用 Node.js `ssh2` 库，不依赖本地 OpenSSH 可执行程序。命令参数支持 `-p`、`-l`、`-i`、`-J` 和 `-o ProxyJump=...`，包括逗号分隔的多跳路径。
-
-读取 `~/.ssh/config` 中的 `Host` 通配／排除规则、`HostName`、`User`、`Port`、`IdentityFile`（可多条）、`IdentityAgent`、`IdentitiesOnly` 和 `ProxyJump`。命令行参数优先，每个跳板机独立解析。例如：
-
-```sshconfig
-Host gateway
-    HostName gateway.example.com
-    User bastion
-    IdentityFile ~/.ssh/gateway_key
-
-Host work
-    HostName dev.internal
-    User developer
-    ProxyJump gateway
-    IdentityFile ~/.ssh/work_key
-```
-
-使用 `/remote ssh work` 即可连接。未配置 `IdentityFile` 时，每一跳都会尝试上述默认私钥；因此普通 `ssh -J ...` 路径在两端均接受默认密钥时，也无需 SSH Agent。
-
-这只是明确支持的配置子集，不是完整 OpenSSH 兼容层：不读取系统 SSH 配置；拒绝 `Match` 段及对当前主机生效的 `Include`、`ProxyCommand` 或主机名规范化配置，其他配置项未实现。`IdentitiesOnly yes` 会完全禁用 Agent 认证，`IdentityAgent none` 同样禁用它。配置中的相对密钥路径以用户主目录为基准，支持 `~/` 和 `%d/%h/%n/%p/%r/%u/%%` token。
-
-## 版本发布
-
-最新版本：[v0.1.15](https://github.com/petrichor20211/pi-ssh-remote/releases/tag/v0.1.15)
-
-| 版本 | 日期 | 主要内容 |
-|---|---|---|
-| [0.1.15](CHANGELOG.md#0115---2026-10-11) | 2026-10-11 | 按主机解析 SSH 配置并发现默认密钥、保留路由的重连，以及界面与补全修复 |
-| [0.1.14](CHANGELOG.md#0114---2026-09-28) | 2026-09-28 | ProxyJump 跳板连接、`/remote` 参数补全及更清晰的 SSH 工具路由 |
-| [0.1.13](CHANGELOG.md#0113---2026-09-18) | 2026-09-18 | 工作目录不可用时平滑回退、延长 SSH 握手等待并修复 Windows 路径 |
-| [0.1.12](CHANGELOG.md#0112---2026-08-25) | 2026-08-25 | 安全处理 SSH 握手期间断线所触发的连续错误 |
-
-完整的新增内容、行为变更和 Bug 修复记录请查看 [CHANGELOG.md](CHANGELOG.md)。
-
-MIT License。
+MIT

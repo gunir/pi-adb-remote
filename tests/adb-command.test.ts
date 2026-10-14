@@ -229,7 +229,7 @@ describe("/adb command against the fake device", () => {
     const bounded = await command("exec --lines 3 seq 1 40");
     assert.match(bounded, /Showing last 3 of 40 lines/);
     assert.equal(bounded.trim().split("\n").filter((line) => /^\d+$/.test(line.trim())).length, 3, `preview: ${bounded}`);
-    assert.match(await command("exec --timeout 1 sleep 30"), /timed out after 1 seconds/);
+    assert.match(await command("exec --timeout 1 sleep 30"), /timed out after 1 seconds; the command may have partially run/);
     assert.match(await command("exec --lines"), /Expected --lines N, --timeout SECONDS or -- followed by a command/);
   });
 

@@ -576,4 +576,8 @@ Each of these needs hardware or data this session does not have; none is unresol
 
 ## 11. User-gated release checklist (not build steps)
 
-Per `AGENTS.md` "Release safety", none of this happens without an explicit request: fill the `0.1.0` date in `CHANGELOG.md` → align both README release tables → align `package.json`/`package-lock.json` → run step 11's validation ladder → commit → annotated tag `v0.1.0` → push over SSH → `npm publish` → GitHub Release from that tag with the changelog entry as notes → verify npm version, commit, tag, release, and changelog all describe the same artifact. Also outstanding: `repository`/`homepage`/`bugs` in `package.json` still point at `petrichor20211/pi-ssh-remote` and must be retargeted once the new repository exists.
+Per `AGENTS.md` "Release safety", none of this happens without an explicit request: fill the `0.1.0` date in `CHANGELOG.md` → align both README release tables → align `package.json`/`package-lock.json` → run step 11's validation ladder → commit → annotated tag `v0.1.0` → push over SSH → `npm publish` → GitHub Release from that tag with the changelog entry as notes → verify npm version, commit, tag, release, and changelog all describe the same artifact. `repository`/`homepage`/`bugs` in `package.json` now point at `gunir/pi-adb-remote`, `ssh2`/`ssh-config` are
+gone from the manifest and the lockfile, and the changelog starts at this artifact's own `[Unreleased]`
+(`0.1.0` when released). One test-environment limit is worth recording: the fixture `adb` maps device paths
+onto the host verbatim, so an endpoint whose `deviceCwd` is the platform default `/data/local/tmp` cannot be
+established offline — first-connect endpoint registration is therefore covered by the live suite.

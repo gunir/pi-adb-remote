@@ -163,6 +163,21 @@ describe("adb tool routing on a real device", { skip: skipReason }, () => {
     assert.ok(!text(paired).includes("ABCDEF123456"), "the code is never echoed back");
   });
 
+  it("registers the endpoint in the PC config the first time it connects", async () => {
+    const configFile = join(sandbox, "agent", "adb-remote-config.json");
+    const endpoint = `adb -s ${serial}`;
+    rmSync(configFile, { force: true });
+    const connected = await call("adb", { action: "connect", command: endpoint });
+    assert.equal(connected.isError, undefined, text(connected));
+    const written = JSON.parse(readFileSync(configFile, "utf8"));
+    assert.equal(written.activeEndpoint, endpoint, "a first connect must not need a pre-existing entry");
+    assert.equal(written.endpoints?.[endpoint]?.adbCommand, endpoint, "the endpoint is saved under its canonical command");
+    assert.equal(written.endpoints?.[endpoint]?.deviceCwd, "/data/local/tmp", "and starts in the platform default workspace");
+    await harness.runCommand("adb", "config note live check");
+    await call("adb", { action: "connect", command: endpoint });
+    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).endpoints?.[endpoint]?.note, "live check", "reconnecting preserves endpoint settings");
+  });
+
   it("disconnects and returns the tools to the PC", async () => {
     const disconnected = await call("adb", { action: "disconnect" });
     assert.match(text(disconnected), /local/);

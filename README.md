@@ -1,285 +1,223 @@
 <!--
-Agent-first English documentation for pi-ssh-remote. It explains the extension's design, transparent tool routing, persistent workspace model, safety boundaries, compelling workflows, commands, and installation requirements.
+Agent-first English documentation for pi-adb-remote: what the extension does on an Android device, how to
+route Pi's tools at it, every command and action, configuration, session behavior, safety, troubleshooting.
 -->
 
-# pi-ssh-remote
+# pi-adb-remote
 
-**SSH designed for agents—not just for terminals.**
+**An Android device as Pi's workspace — over `adb`, not over SSH.**
 
-[中文文档](README.zh-CN.md) · [Community](https://linux.do/)
+[中文文档](README.zh-CN.md) · [Changelog](CHANGELOG.md)
 
-`pi-ssh-remote` turns a remote machine into Pi's active workspace. After connecting, the agent keeps using its normal `read`, `write`, `edit`, and `bash` tools, but those operations run on the remote server. There is no need to wrap every action in `ssh ...`, copy files back and forth, or make the model reason about two unrelated shells.
+`pi-adb-remote` turns a phone or emulator into Pi's active workspace. After connecting, Pi keeps using its
+normal `read`, `write`, `edit`, `bash`, `ls`, `grep`, and `find` tools — but those operations run on the
+device. Nobody wraps commands in `adb shell`, nobody copies files back and forth, and the model never has
+to reason about two different shells.
 
 ```text
-You: Connect to ssh root@gpu-box -p 2202, open /srv/training,
-     find why the latest run failed, fix it, and restart it in the
-     background. Return the PID and log path.
+You:  Connect to my Pixel, open /data/local/tmp/logs, find why the last capture run failed,
+      fix the config, and rerun it. Give me the log path.
 
-Pi:  connects → changes the persistent remote cwd → reads logs →
-     edits remote files → launches the job on the GPU server
+Pi:   adb connect → pwd → ls logs → read the newest log → edit the config →
+      run the capture again → pull the result to the PC
 ```
 
-## Designed for agent workflows
+Everything runs as the shell user (`uid 2000`) with no root, no Magisk, and no app installed on the phone.
 
-### The remote machine becomes the agent's workspace
+## Requirements
 
-Once connected, Pi's file tools, shell tool, and `!` user shell commands are transparently routed over SSH. The agent can inspect a repository, search logs, edit code, and run tests with the same tool interface it uses locally.
+| Requirement | Notes |
+| --- | --- |
+| Pi with the extension loaded | `pi install npm:pi-adb-remote` or `~/.pi/agent/extensions/` |
+| Android platform-tools | `adb` on `PATH` (`ADB` overrides the binary for tests and custom builds) |
+| A device with USB debugging | or wireless debugging; pairing requires Android 11+ |
+| Node.js ≥ 20 | Pi's TypeScript loader runs the extension |
 
-### Agent control plane, human control plane
+## What changes when a device is connected
 
-The extension exposes `remote` for the agent and `/remote` for the user. You can ask Pi to connect, inspect status, change directory, add a server note, execute a command, create a tunnel, or return to local work in natural language—and still take direct control whenever you want.
+| Pi does | Where it lands |
+| --- | --- |
+| `read`, `write`, `edit` | the device filesystem, relative to the device working directory |
+| `bash` | one `adb shell` invocation per command, exit codes and timeouts intact |
+| `ls`, `grep`, `find` | on the device, with its own `sh`-compatible search tools |
+| `!ls` (your shell `!` command) | on the device, including `cd`, which then persists |
+| `adb` | the device control plane: connect, screens, files, APKs, ports, notes, memory |
+| `/adb` | the same control plane for you, with tab completion |
 
-### Stateful endpoints instead of disposable SSH commands
+Nothing else moves. Your PC working directory, Pi's own files, and other extensions are untouched, so a
+session that flashes a build, edits an init script, and greps `logcat` never has to leave the project.
 
-Each `user@host:port` endpoint remembers its remote working directory, note, and port-forward configuration locally. Notes such as `H100 training`, `staging`, or `customer demo` appear in configuration, status messages, and Pi's footer, so the active execution environment stays visible.
+## Connect
 
-### Resilient and bounded by default
+```text
+/adb                          connect the saved (active) endpoint
+/adb 0A1B2C3D4E5F6            connect a serial → canonical endpoint `adb -s 0A1B2C3D4E5F6`
+/adb use pixel-test           switch to a saved endpoint
+/adb devices                  what adb can see
+/adb pair 192.168.1.20:37021  wireless pairing (the code is typed at the prompt, never stored)
+/adb status                   device, routing, cwd, limits, forwards, notes
+/adb disconnect               back to the local workspace
+```
 
-Dropped connections are automatically re-established during the active session. SSH workspace state is also session-aware: `/new` inherits the current workspace, forks and clones retain their source workspace, and `/resume` restores the selected session's recorded endpoint, remote directory, routing mode, and forwards. Remote commands have a 30-second default timeout. Remote text reads fetch focused ranges instead of downloading complete files, command output is streamed through bounded buffers, and a 32 KB per-turn budget prevents parallel tools from flooding model context. Complete oversized command output is preserved in a permission-restricted temporary file.
+Or ask Pi in plain language — the agent calls the `adb` tool:
 
-### Hybrid local/remote workflows
+```json
+{ "action": "connect", "command": "adb -s 0A1B2C3D4E5F6" }
+```
 
-Tunnel mode forwards remote services to localhost while returning Pi's tools to the local machine. This is useful when the backend runs on a GPU server but the client, browser automation, or integration code lives locally.
+`adb` is one tool with a flat action list, so the agent sees one surface instead of several look-alikes:
 
-## Why not just run `ssh` in Bash?
+| Action | Purpose |
+| --- | --- |
+| `connect`, `reconnect`, `disconnect` | endpoint lifecycle (never auto-selects a device) |
+| `devices`, `status` | what adb sees / what this session is doing |
+| `pair`, `forward`, `unforward` | wireless pairing, `localhost:<port>` into device sockets |
+| `exec` | one device command with the full output envelope |
+| `chdir` | persistently move the device workspace |
+| `screen` | a live PNG screenshot as an image block, plus a copy on the PC |
+| `pull`, `push` | device ↔ PC, including directories |
+| `install`, `uninstall` | APK install and removal (`uninstall` always asks you first) |
+| `note`, `memory` | endpoint note / durable per-device notes |
 
-| Plain SSH command | `pi-ssh-remote` |
-|---|---|
-| Each tool call must wrap or reconstruct SSH | All agent file and shell tools route automatically |
-| Working directory is easy to lose between calls | Remote cwd is persistent and visible |
-| The model must track whether it is local or remote | Pi's prompt and footer identify the active workspace |
-| Disconnects break the workflow | Active-session connections automatically reconnect |
-| Tunneling and remote editing are separate setups | Workspace routing and port forwarding share one control plane |
-| Large output can flood context | Preview and model-output limits are built in |
+Device files are addressed absolutely; relative paths resolve against the device working directory.
+One-off device commands take their limits from the command line:
 
-## Install
+```text
+/adb exec getprop ro.build.version.release
+/adb exec --timeout 120 dumpsys activity recents
+/adb exec --lines 20 logcat -d -v brief
+/adb exec -- grep -c . /data/local/tmp/notes.txt
+```
+
+## The device is not a Linux server
+
+The transport is built around what `adb` actually is, and the differences are surfaced instead of hidden:
+
+- **One `sh`, no PTY.** A command becomes `adb -s <serial> exec-out "sh -c '<argv-safe command>'"` — one
+  frame, no shell string built by the caller, no PTY, no `$?` games: the exit code travels on a separate
+  channel, so the shell's last word can never forge it.
+- **No `bash`, no GNU utilities.** Toybox only. `timeout -k 5 -s TERM N` (short options), `sed -n 'a,bp'` for
+  line ranges, `stat -L -c '%F|%a|%s'` for metadata. Missing applets are reported, not emulated.
+- **Writable means `/data/local/tmp` and its subdirectories.** That is the default device workspace, and a
+  session can move inside it (`/adb cd /data/local/tmp/repo`); `/sdcard` writes are reported as FUSE/SELinux
+  boundaries rather than blamed on the extension.
+- **Text and binary are decided by content.** A sniff of the first 8 KB plus the extension decides whether a
+  file is refused as binary, truncated to a range, or streamed. Large binaries are never slurped into context.
+- **Screens and APKs are handled as bytes**, never as text: `screen` returns a PNG image block that the model
+  can actually look at, and a copy in the session's temporary directory on the PC.
+
+## Safety boundaries
+
+- **No silent device substitution.** A session is bound to a device identity (`ro.serialno`). If the
+  attached device is not the one the session was saved for, the extension refuses and stops routing.
+- **No mutation retry storms.** A timed-out or dropped command is reported as *unknown outcome*; only
+  read-class operations are ever retried, and a reconnect is shared by a single-flight promise.
+- **Nothing is uninstalled or overwritten without asking.** `uninstall` requires your confirmation;
+  `push` and `pull` refuse to overwrite unless you say so.
+- **Pairing codes and secrets stay out of argv**, transcripts, config, and session entries — the code goes
+  to `adb pair` on stdin.
+- **Output is bounded by design**: per-command byte and line budgets, a per-turn model-output budget, and a
+  spill file on the PC for the complete oversized output.
+
+## Configuration
+
+`~/.pi/agent/adb-remote-config.json`, one entry per endpoint, created on first connect. It is machine
+state, not user-editable-required: `/adb config` writes it for you.
+
+```json
+{
+  "activeEndpoint": "adb -s 0A1B2C3D4E5F6",
+  "endpoints": {
+    "adb -s 0A1B2C3D4E5F6": {
+      "adbCommand": "adb -s 0A1B2C3D4E5F6",
+      "deviceCwd": "/data/local/tmp",
+      "note": "test Pixel",
+      "forwards": ["19000:tcp:5555"],
+      "imageMaxBytes": 8388608
+    }
+  },
+  "displayLines": 5,
+  "readMaxBytes": 16384,
+  "readMaxLines": 400,
+  "execMaxBytes": 8192,
+  "execMaxLines": 200,
+  "turnMaxBytes": 32768
+}
+```
+
+| Key | Scope | Default | Meaning |
+| --- | --- | --- | --- |
+| `activeEndpoint` | global | last connected | endpoint used by a bare `/adb` and by a new session |
+| `adbCommand` | endpoint | `adb` | full selector command (`adb`, `adb -s <serial>`) |
+| `deviceCwd` | endpoint | `/data/local/tmp` | persistent device working directory |
+| `note` | endpoint | — | your label for the device, shown in `status` and in the device list |
+| `forwards` | endpoint | none | forwards restored with each connection |
+| `imageMaxBytes` | endpoint | 8 MB | largest image the `read` tool accepts (max 64 MB) |
+| `displayLines` | global | 5 (max 50) | collapsed device command output |
+| `readMaxBytes` / `readMaxLines` | global | 16 KB / 400 | default `read` range |
+| `execMaxBytes` / `execMaxLines` | global | 8 KB / 200 | default device command output |
+| `turnMaxBytes` | global | 32 KB | aggregate device output per turn (never below 1 KB per call) |
+
+Change it through the command, which validates and saves it:
+
+```text
+/adb config                                    dump the whole configuration
+/adb config note "training phone"              per-endpoint note
+/adb config cwd /data/local/tmp/repo           default device directory
+/adb config image-max-bytes 2097152            largest image `read` accepts
+/adb config forward 19000:tcp:5555             persist a forward
+/adb config display-lines 12                   collapsed output lines
+/adb config read-max-bytes 65536               per-read byte budget
+/adb config turn-max-bytes 65536               per-turn budget
+```
+
+## Sessions and state
+
+| Event | Behavior |
+| --- | --- |
+| `/new` | inherits the live connection and routing (fresh scratch space) |
+| `/fork`, `/clone` | keep the source session's device, directory, and routing |
+| `/resume` | reconnects and restores the recorded directory, routing, and forwards — or refuses a different phone |
+| reload | keeps the connection in-process; forwards are re-registered, not doubled |
+| exit | stops forwards, removes the session scratch directory, saves the last endpoint |
+
+Per-device notes (`/adb memory`, `adb(action="memory")`) are stored on the **PC**, keyed by device identity,
+and injected into context as a device-memory section — so a note written today is available the next time
+that exact phone is connected, in any project, with no host round-trip and no `scp`.
+
+## Troubleshooting
+
+| Message | What it means |
+| --- | --- |
+| `no devices/emulators found` | cable, USB debugging, or `adb devices` — the endpoint name will not conjure a device |
+| `unauthorized` | accept the “Allow USB debugging” dialog on the phone |
+| `device offline` | the phone is still settling; the extension polls for 5 s, then asks you to unlock and replug |
+| `more than one device/emulator` | two selectors collide; `adb kill-server` and name the endpoint explicitly |
+| `adb server version mismatch` | update platform-tools; the extension offers to restart the server |
+| `Local port N is already forwarded or in use` | another tool owns that port — only this extension's own forwards are touched |
+| `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | signatures differ; ask the user before `adb(action="uninstall")` |
+| `screencap: permission denied` / an error instead of a PNG | the screen is locked; unlock it, then retry |
+| `Refusing to read device binary file as text` | correct behavior; use `pull` (or `screen` for images) |
+
+## Development
 
 ```bash
-pi install npm:pi-ssh-remote
+npm run typecheck          # types
+npm test                   # offline suite: a scripted fake adb, no device needed
+PI_ADB_LIVE=1 npm run test:live   # optional: against a real attached device
 ```
 
-Requires Node.js 20+. The remote server must provide Bash, SFTP, and GNU `timeout`.
+The offline suite is the gate; it runs in CI with no device attached. The live suite self-skips unless both
+the environment variable and a device are present, and cleans up after itself on the phone. Measured device
+facts, the failure catalog, and the build order live in
+[`ARCHITECTURE_PLAN_adb-remote-transport.md`](ARCHITECTURE_PLAN_adb-remote-transport.md).
 
-## Quick start
-
-```text
-/remote ssh root@gpu-box.example.com -p 2202
-/remote cd /srv/project
-/remote config note H100 training server
-/remote status
-```
-
-From this point, normal Pi operations target `/srv/project` on the remote server. The footer makes that routing explicit:
-
-```text
-H100 training server (root@gpu-box.example.com:2202):/srv/project
-```
-
-Return to local tools with:
-
-```text
-/remote disconnect
-```
-
-### Server memory
-
-Tell Pi what to remember for the current server:
-
-```text
-Remember for this server: use /opt/conda/bin/python and never stop shared jobs.
-```
-
-List saved entries and their IDs:
-
-```text
-/remote memory
-```
-
-Use an ID to update or delete an entry:
-
-```text
-Update memory deploy-command to use /opt/deploy/v2/run.sh.
-Delete memory obsolete-proxy-rule.
-```
-
-Pi automatically applies saved memory when you work on that server. Deletion only happens when you explicitly request it.
-
-### Private key authentication
-
-Pass an explicit local private key with `-i`:
-
-```text
-/remote ssh -i ~/.ssh/id_ed25519 root@gpu-box.example.com -p 2202
-```
-
-Identity paths must be absolute or start with `~/`. Unencrypted and passphrase-protected private keys are supported. Pi prompts for an encrypted key's passphrase and caches it only in the current process for reconnects; `/remote forget` clears it. When `-i` is present, that key is used exclusively instead of silently falling back to SSH agent or password authentication. Without `-i`, each host tries its SSH agent, configured or default key files, then a cached or prompted password. Default keys are `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, and `~/.ssh/id_rsa`; missing files are skipped.
-
-### Jump hosts (ProxyJump)
-
-Connect through one or more jump hosts without opening a local SSH tunnel:
-
-```text
-/remote ssh -J bastion@gateway.example.com:2222 developer@dev.internal
-/remote ssh -J bastion@gateway.example.com,relay@relay.internal developer@dev.internal
-/remote ssh -o ProxyJump=bastion@gateway.example.com developer@dev.internal
-```
-
-Each hop has its own host-key confirmation, SSH configuration, and authentication. `-i` applies only to the destination; jump hosts use their own configured/default keys or agent. Without command-line or config overrides, jump ports default to 22 and usernames default to the local user, not the destination user. Use brackets for IPv6 jump addresses, for example `user@[2001:db8::1]:2222`.
-
-Reconnects rebuild the same route. Disconnect closes the whole chain; `/remote forget` also clears cached credentials for its jump hosts. Jump servers must allow TCP forwarding to the next host. No direct-connection fallback is attempted if a jump fails.
-
-## Examples
-
-### 1. Let the agent investigate and repair a remote failure
-
-```text
-Connect to ssh ubuntu@training.example.com -p 22 and work in /opt/app.
-Inspect the failed deployment, trace the error through the logs and source,
-make the smallest safe fix, run the relevant tests, and show me the diff.
-```
-
-The connection is established once. Subsequent reads, searches, edits, and tests are ordinary Pi tool calls routed to the server.
-
-### 2. Launch a long GPU job without blocking the agent
-
-```text
-On the current remote server, validate the training command first. Then launch
-it with nohup in the background, redirect stdout and stderr from process start,
-and report the PID, output directory, and log path. Verify that the process is
-still alive and that the log has started.
-```
-
-The default foreground timeout prevents an accidental long-running command from occupying the agent indefinitely, while an explicitly backgrounded job continues on the server.
-
-### 3. Keep several machines understandable
-
-```text
-/remote ssh root@10.0.0.21 -p 22
-/remote config note 8xH100 training
-/remote config cwd /srv/train
-
-/remote ssh ubuntu@staging.example.com -p 2222
-/remote config note staging API
-/remote config cwd /opt/service
-
-/remote config
-/remote use root@10.0.0.21:22
-/remote
-```
-
-Endpoint notes and working directories survive Pi restarts and remain separate for each saved endpoint.
-
-### 4. Expose a remote service while editing locally
-
-```text
-/remote config forward 7860:127.0.0.1:7860
-/remote forward
-```
-
-Now `localhost:7860` reaches the service on the SSH server, while Pi's file and shell tools remain local. This is ideal for a remote model server paired with a local UI or client repository.
-
-Stop the tunnels with:
-
-```text
-/remote unforward
-```
-
-### 5. Ask Pi directly
-
-```text
-Connect to my configured remote, switch to /srv/api, and inspect its Git status.
-```
-
-```text
-Add the note "production read-only" to this endpoint and tell me which remote
-workspace is active.
-```
-
-```text
-Forward the remote service on port 8000 to localhost:8000, but keep my coding
-tools on the local repository.
-```
-
-## Command reference
-
-| Command | Purpose |
-|---|---|
-| `/remote ssh USER@HOST -p PORT [-i KEY]` | Save, select, and connect using SSH config, agent, key files, or password |
-| `/remote` | Connect to the selected endpoint or prompt for one |
-| `/remote config` | List saved endpoints and settings |
-| `/remote use USER@HOST:PORT` | Select a saved endpoint |
-| `/remote config note TEXT` | Persist a note for the selected endpoint |
-| `/remote config note --clear` | Clear its note |
-| `/remote memory` | List the current server's memory entries and IDs |
-| `/remote config cwd PATH` | Persist its default remote working directory |
-| `/remote cd PATH` | Change the connected remote cwd and persist it |
-| `/remote config forward MAPPING...` | Persist port forwards such as `7860:127.0.0.1:7860` |
-| `/remote forward [MAPPING...]` | Start tunnels and keep Pi's tools local |
-| `/remote unforward` | Stop extension-managed tunnels |
-| `/remote exec COMMAND` | Run one command in the remote cwd |
-| `/remote exec --timeout 60 COMMAND` | Override the command timeout |
-| `/remote exec --lines 20 COMMAND` | Override collapsed preview lines |
-| `/remote config display-lines 10` | Set default collapsed preview lines (maximum 50) |
-| `/remote config read-max-lines 400` | Set the remote read line budget |
-| `/remote config read-max-bytes 16384` | Set the remote read byte budget |
-| `/remote config exec-max-lines 200` | Set the remote command line budget |
-| `/remote config exec-max-bytes 8192` | Set the remote command byte budget |
-| `/remote config turn-max-bytes 32768` | Set the aggregate per-turn remote output budget |
-| `/remote status` | Show connection state, full SSH command, and working directory |
-| `/remote reload` / `/remote reconnect` | Reconnect the saved workspace, including after disconnect |
-| `/remote disconnect` | Disconnect and return tools to local execution |
-| `/remote forget` | Disconnect and clear cached passwords and key passphrases |
-
-### Slash-command completion
-
-`/remote` supports Pi argument completion. Try typing a partial subcommand like `/remote sta` to complete `status`, or `/remote use ` to choose from saved endpoints.
-
-## Persistence, output, and security
-
-Endpoint configuration is stored locally in:
-
-```text
-~/.pi/agent/ssh-remote-config.json
-```
-
-Saved global values include endpoints, active endpoint, notes, remote working directories, forwards, identity file paths, preview settings, and model-output budgets. Each Pi session also stores non-secret SSH workspace metadata so `/resume` can restore the server associated with that session. Private key contents, passwords, and key passphrases are **never written to this file**. Private keys are read locally only when connecting; prompted passwords and passphrases remain only in process memory.
-
-New or changed host keys require interactive confirmation and are stored separately from OpenSSH. By default, remote text reads return at most 400 lines or 16 KB, remote command results return the last 200 lines or 8 KB, and all remote tools in one agent turn share a 32 KB output budget. Text reads support `offset`/`limit` continuation without downloading the complete remote file. Oversized command output is streamed to a permission-restricted temporary local file rather than accumulated in memory. Configured limits may be raised only to the extension's hard safety ceilings. Preview-line settings affect only the collapsed UI and never increase model output.
-
-## Current SSH scope
-
-Connections use the Node.js `ssh2` library; no local OpenSSH executable is required. Command options are `-p`, `-l`, `-i`, `-J`, and `-o ProxyJump=...` (including comma-separated jump chains).
-
-`~/.ssh/config` supports `Host` patterns/negation, `HostName`, `User`, `Port`, `IdentityFile` (multiple entries), `IdentityAgent`, `IdentitiesOnly`, and `ProxyJump`. Command-line options take precedence, and every jump host is resolved independently. For example:
-
-```sshconfig
-Host gateway
-    HostName gateway.example.com
-    User bastion
-    IdentityFile ~/.ssh/gateway_key
-
-Host work
-    HostName dev.internal
-    User developer
-    ProxyJump gateway
-    IdentityFile ~/.ssh/work_key
-```
-
-Connect with `/remote ssh work`. Without `IdentityFile`, the default keys above are tried on each host, so ordinary `ssh -J ...` routes also work without an agent when both hosts accept a default key.
-
-This is a supported subset, not full OpenSSH compatibility: system SSH config is not read; `Match` sections and applicable `Include`, `ProxyCommand`, or hostname canonicalization are rejected. Other config directives are not implemented. `IdentitiesOnly yes` disables agent authentication entirely; `IdentityAgent none` also disables it. Config key paths resolve relative to the home directory and support `~/` and `%d/%h/%n/%p/%r/%u/%%` tokens.
-
-## Releases
-
-Latest release: [v0.1.15](https://github.com/petrichor20211/pi-ssh-remote/releases/tag/v0.1.15)
+## Release
 
 | Version | Date | Highlights |
-|---|---|---|
-| [0.1.15](CHANGELOG.md#0115---2026-10-11) | 2026-10-11 | Per-host SSH config and default-key discovery, route-preserving reconnects, and UI/autocomplete fixes |
-| [0.1.14](CHANGELOG.md#0114---2026-09-28) | 2026-09-28 | ProxyJump connections, `/remote` argument completion, and clearer SSH tool routing |
-| [0.1.13](CHANGELOG.md#0113---2026-09-18) | 2026-09-18 | Graceful working-directory fallback, longer SSH handshakes, and Windows path fixes |
-| [0.1.12](CHANGELOG.md#0112---2026-08-25) | 2026-08-25 | Safe handling of repeated SSH errors when a connection is lost during handshake |
+| --- | --- | --- |
+| [0.1.0](CHANGELOG.md#unreleased) | in development | first `pi-adb-remote` release: Android device transport replacing the SSH workspace, device-routed file/shell/search tools, `adb` control tool and `/adb` command |
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete release history, including additions, behavior changes, and bug fixes.
+## License
 
-MIT licensed.
+MIT

@@ -1082,6 +1082,9 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
       const next = await establishDevice(parsed, targetCwd, ctx);
       applyDevice(next, command);
       lastConnectionError = undefined;
+      // A successful connect registers its endpoint: without this a bare `/adb` and `/adb use`
+      // would never find the device the user just connected to.
+      saveEndpointConfig(command, { adbCommand: command }, true);
       status(ctx);
       persistSessionDeviceState();
       ctx.ui.notify(next.unavailableCwd
@@ -1418,8 +1421,16 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
     promptGuidelines: ["When using bash for device logs and broad searches, use bounded commands such as tail, sed, or grep with limits instead of cat or unbounded find output."],
     execute: async (id: string, params: any, signal: AbortSignal | undefined, update: any) => {
       if (!device || !routeDeviceTools) return localBash.execute(id, params, signal, update);
-      const result = await createBashTool(localCwd, { operations: deviceBashOps() }).execute(id, params, signal, update);
-      return limitDeviceToolResult(result, "exec");
+      try {
+        const result = await createBashTool(localCwd, { operations: deviceBashOps() }).execute(id, params, signal, update);
+        return limitDeviceToolResult(result, "exec");
+      } catch (error) {
+        // Pi's built-in message is written for a local shell; on a routed session the model has to
+        // know the command died on the phone, where its effects may be half-applied.
+        const message = error instanceof Error ? error.message : String(error);
+        if (/^Command timed out after /.test(message)) throw new Error(`${message} on the device; the command may have partially run, so check device state before retrying a write.`);
+        throw error;
+      }
     },
   });
 
@@ -1670,7 +1681,7 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
             maxCaptureBytes: SPILL_CAP_BYTES,
           });
           if (result.timedOut || result.exitCode === 124 || result.exitCode === 137) {
-            throw new DeviceCommandError(`Device command timed out after ${timeoutSeconds} seconds`, result.exitCode, accumulator.errorMessage(), true);
+            throw new DeviceCommandError(`Device command timed out after ${timeoutSeconds} seconds; the command may have partially run, so check device state before retrying a write.`, result.exitCode, accumulator.errorMessage(), true);
           }
           touchDevice();
           const formatted = accumulator.finish();
@@ -1994,7 +2005,7 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
               maxCaptureBytes: SPILL_CAP_BYTES,
             });
             if (result.timedOut || result.exitCode === 124 || result.exitCode === 137) {
-              throw new Error(`Device command timed out after ${timeoutSeconds} seconds`);
+              throw new Error(`Device command timed out after ${timeoutSeconds} seconds; the command may have partially run, so check device state before retrying a write.`);
             }
             touchDevice();
             const formatted = accumulator.finish();

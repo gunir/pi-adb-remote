@@ -2,296 +2,72 @@
 
 All notable user-visible changes to this project are documented in this file.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Release dates are npm publication dates, and versions follow this repository's pre-1.0 versioning policy documented in `AGENTS.md`.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Release dates are npm
+publication dates, and versions follow this repository's pre-1.0 versioning policy documented in
+`AGENTS.md`.
+
+`pi-adb-remote` is a new artifact forked from `pi-ssh-remote 0.1.15`; its history starts at `0.1.0`, and
+the SSH-era changelog deliberately does not come with it.
 
 ## [Unreleased]
 
 ### Added
 
-- None.
+- Android device transport: `read`, `write`, `edit`, `bash`, `ls`, `grep`, and `find` route to the attached
+  device through `adb` subprocesses, with no SSH, SFTP, or long-lived socket involved.
+- `adb` tool with a flat action surface: `connect`, `reconnect`, `devices`, `status`, `disconnect`, `pair`,
+  `forward`, `unforward`, `exec`, `chdir`, `note`, `memory`, `screen`, `pull`, `push`, `install`,
+  `uninstall`.
+- `/adb` command with argument completion for actions, saved endpoints, `config` keys, and `exec` flags; a
+  bare `/adb` connects the active endpoint and `/adb <serial>` canonicalizes to `adb -s <serial>`.
+- Device routing for the `!` user shell, including `cd`, which persists the device working directory.
+- `screen` action: a live PNG screenshot as an image block the model can see, plus a copy in the session's
+  scratch directory on the PC.
+- Wireless pairing through `adb pair` with the pairing code supplied on stdin, never in argv, transcripts, or
+  configuration.
+- Port forwards (`localhost:<port>` → device socket) registered per spec, listed with the device status, and
+  restored on reconnect without touching other tools' forwards.
+- Endpoint persistence in `~/.pi/agent/adb-remote-config.json`: device working directory, note, forwards, and
+  image cap per endpoint, with the connected endpoint registered on first connect.
+- Per-device memory keyed by `ro.serialno`, stored on the PC and injected as a `adb_remote_*` context section
+  for that device in any project.
+- Prompt sections `adb_remote_connection`, `adb_remote_workspace`, and `adb_remote_memory_management`, plus a
+  routing reminder re-injected after compaction.
+- Connection state machine: transient `offline`/`unauthorized` settling after a replug, a staleness pre-flight
+  before the next operation, single-flight reconnect shared by concurrent callers, and read-only retry policy.
+- Session resume: `/new` inherits the live connection, forks keep their source workspace, and `/resume`
+  re-attaches the recorded device, directory, routing, and forwards — refusing a different phone.
+- Offline test suite driven by a scripted fake `adb` (`tests/fixtures/fake-adb.sh`), covering the argument
+  layer, transport, tool routing, the `adb` action surface, `/adb` completions, and the session state machine.
+- Optional live device suite (`PI_ADB_LIVE=1 npm run test:live`) that self-skips without hardware and cleans
+  up the phone, its forwards, and its configuration afterwards.
+- Documentation for the device model, safety boundaries, configuration, and troubleshooting in `README.md`
+  and `README.zh-CN.md`, and repository rules for the device contract in `AGENTS.md`.
 
 ### Changed
 
-- None.
+- All user-facing vocabulary now describes a device, not a host: `deviceCommand`, `devicePath`, `hostPath`,
+  `deviceCwd`, and `adb`-prefixed configuration keys replace the SSH names, and SSH-era config keys are
+  ignored instead of silently migrated.
+- Device commands run as a single `exec-out` frame with the exit code on a dedicated channel; the shell's last
+  word can no longer forge a success code.
+- Device file writes stage through `<dir>/.pi-staging` and rename into place, collecting their own stale
+  staging files; `atomic: true` skips staging.
+- Command output is bounded per call (400 lines / 16 KB for reads, 200 lines / 8 KB for commands) and per turn
+  (32 KB), with complete oversized output spilled to a PC file; `read` ranges are 1-indexed line numbers.
+- Connect failures report the adb diagnosis and the matching recovery action instead of the first line of a
+  generic failure, including the `adb sees:` device list when an endpoint is absent.
+- Session state is recorded as version `2` entries keyed by device identity; version `1` (SSH) entries are
+  ignored rather than misapplied.
+
+### Removed
+
+- The SSH transport and its dependency surface: `ssh2`, `@types/ssh2`, and `ssh-config` are gone, along with
+  `~/.ssh/config` parsing, key/agent authentication, host-key prompts, and the `remote` tool and `/remote`
+  command.
+- Endpoint "forget" and credential handling — an ADB endpoint has no credentials to store, so the only
+  per-endpoint secret in the product (a pairing code) is never persisted at all.
 
 ### Fixed
 
 - None.
-
-## [0.1.15] - 2026-10-11
-
-### Added
-
-- Added per-host `~/.ssh/config` resolution for host aliases/patterns, connection settings, identity files/agent, and ProxyJump, with independent configuration for every hop.
-- Added default Ed25519, ECDSA, and RSA private-key discovery for destinations and jump hosts without requiring OpenSSH.
-
-### Changed
-
-- Try SSH agent and configured/default private keys before cached or prompted passwords; explicit destination `-i` remains exclusive.
-- Separated SSH configuration, authentication, and connection handling into focused TypeScript modules, with UI-independent credential prompting.
-- Kept connection-result UI to a fixed one-line summary, with full connection details available to the agent and through `/remote status`; jump connections include a compact `via` label.
-
-### Fixed
-
-- Suppressed `/remote` autocomplete while the cursor has non-whitespace command text after it, so Enter runs the existing command instead of inserting a duplicate completion.
-- Prevent `this.child.invalidate is not a function` crashes when Pi invalidates connection-result summaries, including historical results in resumed sessions, while preserving their fixed one-line display.
-- Avoid unnecessary password prompts on jump routes when a usable local default or configured private key is available.
-- Exposed the complete SSH command in agent context, connection/status/disconnect results, and connection failures instead of identifying jump-relative targets only by host and port.
-- Retained the saved SSH command and last remote directory after disconnect and session reload, allowing an explicit no-argument reconnect to rebuild the same route without automatically reconnecting a disconnected session.
-- Included the attempted SSH hop in connection-setup errors.
-
-## [0.1.14] - 2026-09-28
-
-### Added
-
-- Added `-J` and `-o ProxyJump=...` support for single and multi-hop SSH connections, with per-hop host-key verification and authentication, route-preserving reconnects, and full-chain cleanup.
-- Added Pi argument completion for `/remote` subcommands, saved endpoints, config keys, and exec flags, including preserving already-entered `/remote exec` options while completing later flags.
-
-### Changed
-
-- Removed automatic trailing spaces from `/remote` subcommand completions, leaving users to type the separator before entering the next argument.
-- Updated both README command examples and tables to use the canonical `/remote disconnect` command.
-
-### Fixed
-
-- Made bare `/remote` connect to the endpoint selected by `/remote use` instead of prompting again for an SSH command.
-- Stopped suggesting already-complete `/remote` arguments so Enter submits the command instead of accepting a redundant completion, including when the cursor is immediately after `ssh` before the connection arguments.
-- Preserved Pi's configured `shellPath` and `shellCommandPrefix` for local agent Bash commands, including after returning from SSH, and refreshed them when the session starts or reloads.
-- Rendered each `remote` tool action and its command or primary argument in the tool-call header instead of showing only the tool name, while omitting supplementary cwd, timeout, and endpoint context.
-- Made the active SSH directory and transparent `read`, `write`, `edit`, and `bash` routing explicit through structured prompt state and ordinary tool descriptions, instead of relying on an exact-text system-prompt replacement.
-
-## [0.1.13] - 2026-09-18
-
-### Added
-
-- None.
-
-### Changed
-
-- Increased the SSH handshake timeout to 30 seconds for slower remote connections.
-
-### Fixed
-
-- Stored SSH config, known hosts, and server memory in Pi's agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) instead of falling back to the current working directory when `HOME` is unset, which mainly affected Windows.
-- Expanded `ssh -i ~/...` identity paths with the user home directory from `os.homedir()`, so private keys resolve on Windows.
-- Fell back to the remote login directory with a warning when a saved remote working directory is unavailable, instead of failing the SSH connection.
-
-## [0.1.12] - 2026-08-25
-
-### Added
-
-- None.
-
-### Changed
-
-- Simplified the server-memory documentation to focus on adding, listing, updating, and deleting entries without exposing implementation details.
-
-### Fixed
-
-- Prevented follow-up SSH client errors during a connection loss before handshake from becoming an uncaught exception that exits Pi.
-
-## [0.1.11] - 2026-08-16
-
-### Added
-
-- Added per-`user@host` server-memory JSON files with stable `id` and `content` entries, plus automatic migration from legacy string memories.
-- Added a local-path exception so Pi's normal `read`, `edit`, and `write` tools can manage the active server's memory file while other operations remain routed over SSH.
-- Added `/remote memory` to display the current server's memory entries, IDs, and JSON file path.
-
-### Changed
-
-- Replaced agent-side append/clear memory mutations with prompt-guided entry-level CRUD on the JSON file. Deletion instructions now require an explicit user request, an exact entry ID, and preservation of unrelated entries.
-- Removed `/remote config memory`; the dedicated `/remote memory` command now handles display, while the `remote` tool's `memory` action locates and inspects the JSON file.
-
-### Fixed
-
-- None.
-
-## [0.1.10] - 2026-08-16
-
-### Added
-
-- None.
-
-### Changed
-
-- None.
-
-### Fixed
-
-- Prevented the agent-facing `memory` action from clearing or replacing server memory accidentally: omission now inspects the saved memory, non-empty text appends idempotently, empty text is rejected, and clearing requires an explicit `--clear` value.
-
-## [0.1.9] - 2026-08-12
-
-### Added
-
-- None.
-
-### Changed
-
-- Removed the redundant `SSH remote` prefix from footer status labels.
-
-### Fixed
-
-- Kept injected server memory as a single stable context prefix so tool continuations do not repeatedly move it to the end of the conversation or invalidate cached provider context.
-
-## [0.1.8] - 2026-08-10
-
-### Added
-
-- Added explicit private-key authentication through `ssh -i KEY`, including passphrase-protected keys and in-memory passphrase caching for reconnects.
-
-### Changed
-
-- Renamed the agent-facing `ssh_remote_control` tool to the shorter `remote` name, matching the `/remote` command.
-- Server memory is now keyed by `user@host` and shared across SSH ports; existing endpoint memories are migrated automatically.
-- `/remote forget` now clears cached private-key passphrases as well as passwords.
-
-### Fixed
-
-- None.
-
-## [0.1.7] - 2026-08-05
-
-### Added
-
-- Added non-secret, session-scoped SSH workspace state for endpoint, remote directory, tool-routing mode, and port forwards.
-
-### Changed
-
-- `/new` now inherits the active SSH workspace, forks and clones retain their source workspace, and `/resume` restores the selected historical session's recorded workspace.
-- Session changes close the previous transport cleanly and reconnect the target workspace without storing passwords or other credentials in session files.
-
-### Fixed
-
-- None.
-
-## [0.1.6] - 2026-08-05
-
-### Added
-
-- Added configurable line and byte budgets for remote reads, remote commands, and aggregate per-turn tool output.
-- Added bounded range reads for remote text files with normal `offset` and `limit` continuation.
-
-### Changed
-
-- Remote text reads now default to 400 lines or 16 KB, remote command results default to the last 200 lines or 8 KB, and each agent turn defaults to a shared 32 KB remote output budget.
-- Remote command output now streams through bounded buffers, with complete oversized stdout written to a permission-restricted local temporary file.
-- Collapsed command previews are now limited to at most 50 visual lines and remain independent from model-facing output.
-- Moved the complete release history into this changelog and kept concise release indexes in the English and Chinese READMEs.
-
-### Fixed
-
-- Fixed remote text reads downloading complete files over SFTP before applying line and byte limits.
-- Fixed `ssh_remote_control exec` accumulating complete stdout in memory before truncation.
-
-## [0.1.5] - 2026-08-04
-
-### Added
-
-- Added persistent, endpoint-specific server memory through `/remote config memory TEXT` and the `ssh_remote_control` `memory` action.
-- Added automatic injection of that memory into every model request while the matching endpoint is the active remote workspace.
-
-### Changed
-
-- Server memory is removed from subsequent model requests when remote tool routing is disabled, including disconnect and tunnel-only mode.
-- `/remote config` now shows the memory stored for each endpoint.
-
-### Fixed
-
-- None.
-
-## [0.1.4] - 2026-07-31
-
-### Added
-
-- Added persistent endpoint notes through `/remote config note TEXT` and the `ssh_remote_control` `note` action.
-- Added per-command timeout overrides through `/remote exec --timeout SECONDS` and the tool's `timeout` parameter.
-
-### Changed
-
-- Remote commands now default to a 30-second timeout and endpoint notes appear in status, connection, reconnection, and footer labels.
-- Expanded the documentation around agent-first workflows, multi-server operation, background jobs, and tunnel mode.
-
-### Fixed
-
-- Fixed remote commands that could run without a deadline by enforcing GNU `timeout` remotely and a local fallback timer.
-- Fixed timeout reporting for processes terminated with timeout-related exit codes 124 and 137.
-
-## [0.1.3] - 2026-07-24
-
-### Added
-
-- Added configurable collapsed command previews with `/remote config display-lines N`, `/remote exec --lines N`, and the tool's `displayLines` parameter.
-- Added expandable custom rendering for remote command results.
-
-### Changed
-
-- Remote command previews default to the last five visual lines while model-facing output remains limited to 2,000 lines or 50 KB.
-- Oversized complete output is saved to a permission-restricted local temporary file.
-
-### Fixed
-
-- Fixed `/remote exec` truncating its notification to an arbitrary 4,000 characters without preserving or identifying the full output.
-
-## [0.1.2] - 2026-07-24
-
-### Added
-
-- None.
-
-### Changed
-
-- Republished the 0.1.1 runtime as 0.1.2 to align npm package version metadata; there were no runtime code changes.
-
-### Fixed
-
-- None.
-
-## [0.1.1] - 2026-07-24
-
-### Added
-
-- Added the shorter `/remote ssh USER@HOST [-p PORT]` connection command.
-
-### Changed
-
-- `/remote ssh` now saves, selects, and immediately connects to the endpoint instead of only storing it.
-
-### Fixed
-
-- Fixed help and error text that still instructed users to run the obsolete `/remote config ssh ssh ...` form.
-
-## [0.1.0] - 2026-07-24
-
-### Added
-
-- Initial release with persistent multi-endpoint SSH workspaces and remote working directories.
-- Added transparent routing for Pi's `read`, `write`, `edit`, `bash`, and user shell operations.
-- Added SSH-agent/password authentication, interactive host-key verification, automatic reconnection, SFTP file access, bounded command output, and local TCP forwarding.
-
-### Changed
-
-- None.
-
-### Fixed
-
-- None.
-
-[Unreleased]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.15...HEAD
-[0.1.15]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.14...v0.1.15
-[0.1.14]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.13...v0.1.14
-[0.1.13]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.12...v0.1.13
-[0.1.12]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.11...v0.1.12
-[0.1.11]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.10...v0.1.11
-[0.1.10]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.9...v0.1.10
-[0.1.9]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.8...v0.1.9
-[0.1.8]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.7...v0.1.8
-[0.1.7]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.6...v0.1.7
-[0.1.6]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.5...v0.1.6
-[0.1.5]: https://github.com/petrichor20211/pi-ssh-remote/compare/v0.1.4...v0.1.5
-[0.1.4]: https://github.com/petrichor20211/pi-ssh-remote/releases/tag/v0.1.4
-[0.1.3]: https://www.npmjs.com/package/pi-ssh-remote/v/0.1.3
-[0.1.2]: https://www.npmjs.com/package/pi-ssh-remote/v/0.1.2
-[0.1.1]: https://www.npmjs.com/package/pi-ssh-remote/v/0.1.1
-[0.1.0]: https://www.npmjs.com/package/pi-ssh-remote/v/0.1.0
