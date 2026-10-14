@@ -150,6 +150,12 @@ case "$last" in
     ;;
 esac
 
+# Canned `stat` answer: lets tests drive the %F vocabulary and malformed modes (V13/F21).
+if [ -n "${FAKE_ADB_STAT-}" ] && printf '%s' "$last" | grep -q 'stat -L'; then
+  printf '%s\n' "$FAKE_ADB_STAT"
+  exit 0
+fi
+
 if [ ! -d "${FAKE_ADB_ROOT:-/}" ]; then
   printf 'adb: no such root\n' 1>&2
   exit 1
