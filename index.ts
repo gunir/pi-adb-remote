@@ -961,7 +961,8 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
     // chdir sees the previous one's result, so a running command keeps its snapshot (F26/F27).
     const run = async (): Promise<string> => {
       const state = await ensureDevice(ctx);
-      const target = requested.trim() || DEFAULT_DEVICE_CWD;
+      // Bare `cd` means "the workspace I am in": the endpoint cwd, which chdir keeps current (V27).
+      const target = requested.trim() || endpointConfig(loadDeviceConfig(), state.device.command).deviceCwd || DEFAULT_DEVICE_CWD;
       const result = await state.transport.exec(`cd -- ${quote(target)} && pwd -P`, state.cwd, { timeoutSeconds: DEFAULT_DEVICE_TIMEOUT_SECONDS });
       const resolved = result.stdout.toString("utf8").trim();
       if (result.exitCode !== 0 || !resolved) {
@@ -989,7 +990,8 @@ export default function adbRemoteExtension(pi: ExtensionAPI) {
       if (tokens.length > 3) return undefined;
       if (tokens.length === 3 && tokens[1] !== "--") return undefined;
       const last = tokens.at(-1);
-      return last === "cd" || last === "--" ? DEFAULT_DEVICE_CWD : last;
+      // Empty string marks a bare `cd`, resolved to the endpoint cwd once the device is known.
+      return last === "cd" || last === "--" ? "" : last;
     } catch {
       return undefined;
     }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { closeSync, existsSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import {
   createOutputFile,
@@ -101,7 +101,11 @@ test("output helpers write under the requested directory", () => {
   writeSync(file.fd, "nested write");
   closeSync(file.fd);
   assert.equal(readFileSync(join(scratch, "nested", "output.log"), "utf8"), "nested write");
-  assert.equal(saveOutput("standalone").includes(OUTPUT_FILE_PREFIX), true);
+  // A saveOutput without a directory creates its own under the session prefix; take it back down
+  // so the suite leaves no temporary directories behind.
+  const autoCreated = saveOutput("standalone");
+  assert.ok(autoCreated.includes(OUTPUT_FILE_PREFIX));
+  rmSync(dirname(autoCreated), { recursive: true, force: true });
 });
 
 test("previewDeviceOutput honours the display-lines setting", () => {
